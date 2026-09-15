@@ -11,7 +11,9 @@ print(robot)
 T = robot.fkine(robot.qz)  # forward kinematics
 # print(T) 
 T = sm.SE3(0.7, 0.2, 0.1)*sm.SE3.OA([0, 1, 0], [0, 0, -1])
-# print(T)
+
+
+print(T)
 
 sol = robot.ikine_LM(T)  # inverse kinematics
 print(sol)
