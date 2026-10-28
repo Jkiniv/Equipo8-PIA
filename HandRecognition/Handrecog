@@ -1,0 +1,1309 @@
+
+import cv2
+import time
+import numpy as np
+import mediapipe as mp
+from pathlib import Path
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+# En linea 317 hay una opción para ajutar el sistema operativo utilizado, se pone como comentario el que no se use
+
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
+
+
+POSE_MODEL = Path(__file__).parent / "modelos" / "pose_landmarker_full.task"
+
+HAND_MODEL = Path(__file__).parent / "modelos" / "hand_landmarker.task"
+
+
+
+CAMERA_INDEX = 0
+
+# Brazo anatómico que se utilizará:
+# "left"  = brazo izquierdo de la persona
+# "right" = brazo derecho de la persona
+TARGET_ARM = "right"
+
+
+# ============================================================
+# UMBRALES DE MEDIAPIPE
+# ============================================================
+
+POSE_DETECTION_CONFIDENCE = 0.2
+POSE_PRESENCE_CONFIDENCE = 0.2
+POSE_TRACKING_CONFIDENCE = 0.2
+
+HAND_DETECTION_CONFIDENCE = 0.2
+HAND_PRESENCE_CONFIDENCE = 0.2
+HAND_TRACKING_CONFIDENCE = 0.2
+
+
+# ============================================================
+# CONFIGURACIÓN DE CÁMARA
+# ============================================================
+
+CAMERA_WIDTH = 1280
+CAMERA_HEIGHT = 720
+CAMERA_FPS = 30
+
+# Imprimir coordenadas cada cierto tiempo para no saturar terminal
+PRINT_INTERVAL_SECONDS = 0.10
+
+# Distancia máxima normalizada entre:
+# - La muñeca detectada por Pose Landmarker
+# - La muñeca detectada por Hand Landmarker
+MAX_HAND_WRIST_DISTANCE = 0.30
+
+
+# ============================================================
+# CONFIGURACIÓN DE SUAVIZADO
+# ============================================================
+
+USE_SMOOTHING = True
+
+# Entre 0 y 1:
+# Un valor pequeño produce mayor suavizado, pero mayor retraso.
+# Un valor grande produce menor suavizado y respuesta más rápida.
+SMOOTHING_ALPHA = 0.35
+
+
+# ============================================================
+# ÍNDICES DE POSE LANDMARKER
+# ============================================================
+
+POSE_LEFT_SHOULDER = 11
+POSE_RIGHT_SHOULDER = 12
+
+POSE_LEFT_ELBOW = 13
+POSE_RIGHT_ELBOW = 14
+
+POSE_LEFT_WRIST = 15
+POSE_RIGHT_WRIST = 16
+
+
+# ============================================================
+# ÍNDICES DE HAND LANDMARKER
+# ============================================================
+
+HAND_WRIST = 0
+
+
+# ============================================================
+# SELECCIÓN DEL BRAZO
+# ============================================================
+
+if TARGET_ARM.lower() == "left":
+
+    SHOULDER_INDEX = POSE_LEFT_SHOULDER
+    ELBOW_INDEX = POSE_LEFT_ELBOW
+    WRIST_INDEX = POSE_LEFT_WRIST
+
+elif TARGET_ARM.lower() == "right":
+
+    SHOULDER_INDEX = POSE_RIGHT_SHOULDER
+    ELBOW_INDEX = POSE_RIGHT_ELBOW
+    WRIST_INDEX = POSE_RIGHT_WRIST
+
+else:
+
+    raise ValueError(
+        'TARGET_ARM debe tener el valor "left" o "right".'
+    )
+
+
+# ============================================================
+# VERIFICAR ARCHIVOS DE MODELOS
+# ============================================================
+
+import os
+
+if not os.path.isfile(POSE_MODEL):
+    raise FileNotFoundError(
+        "No se encontró el modelo de Pose Landmarker:\n"
+        f"{POSE_MODEL}"
+    )
+
+if not os.path.isfile(HAND_MODEL):
+    raise FileNotFoundError(
+        "No se encontró el modelo de Hand Landmarker:\n"
+        f"{HAND_MODEL}"
+    )
+
+
+# ============================================================
+# CONFIGURACIÓN DE POSE LANDMARKER
+# ============================================================
+
+pose_base_options = python.BaseOptions(
+    model_asset_path=str(POSE_MODEL)
+)
+
+pose_options = vision.PoseLandmarkerOptions(
+    base_options=pose_base_options,
+    running_mode=vision.RunningMode.VIDEO,
+    num_poses=1,
+    min_pose_detection_confidence=POSE_DETECTION_CONFIDENCE,
+    min_pose_presence_confidence=POSE_PRESENCE_CONFIDENCE,
+    min_tracking_confidence=POSE_TRACKING_CONFIDENCE,
+    output_segmentation_masks=False
+)
+
+
+# ============================================================
+# CONFIGURACIÓN DE HAND LANDMARKER
+# ============================================================
+
+hand_base_options = python.BaseOptions(
+    model_asset_path=str(HAND_MODEL)
+)
+
+hand_options = vision.HandLandmarkerOptions(
+    base_options=hand_base_options,
+    running_mode=vision.RunningMode.VIDEO,
+
+    # Se permiten dos manos internamente.
+    # El programa selecciona únicamente la mano más cercana
+    # a la muñeca del brazo objetivo.
+    num_hands=2,
+
+    min_hand_detection_confidence=HAND_DETECTION_CONFIDENCE,
+    min_hand_presence_confidence=HAND_PRESENCE_CONFIDENCE,
+    min_tracking_confidence=HAND_TRACKING_CONFIDENCE
+)
+
+
+# ============================================================
+# FUNCIONES AUXILIARES
+# ============================================================
+
+def normalized_landmark_to_array(landmark):
+    """
+    Convierte un landmark de MediaPipe en un arreglo:
+
+    [x, y, z]
+
+    Estas son las coordenadas normalizadas del landmark.
+    """
+
+    return np.array(
+        [
+            landmark.x,
+            landmark.y,
+            landmark.z
+        ],
+        dtype=np.float32
+    )
+
+
+def normalized_to_pixel(point, width, height):
+    """
+    Convierte las coordenadas normalizadas X/Y a píxeles.
+
+    La coordenada Z no se utiliza para dibujar sobre la imagen.
+    """
+
+    x_pixel = int(point[0] * width)
+    y_pixel = int(point[1] * height)
+
+    return x_pixel, y_pixel
+
+
+def landmark_is_visible(
+    landmark,
+    minimum_visibility=0.2
+):
+    """
+    Comprueba visibility y presence del landmark de Pose.
+
+    Si el objeto no tiene alguno de esos atributos,
+    se toma un valor predeterminado de 1.0.
+    """
+
+    visibility = getattr(
+        landmark,
+        "visibility",
+        1.0
+    )
+
+    presence = getattr(
+        landmark,
+        "presence",
+        1.0
+    )
+
+    return (
+        visibility >= minimum_visibility
+        and presence >= minimum_visibility
+    )
+
+
+def calculate_wrist_distance(
+    hand_landmarks,
+    pose_wrist
+):
+    """
+    Calcula la distancia 2D normalizada entre:
+
+    - Landmark 0 de la mano.
+    - Muñeca detectada por Pose Landmarker.
+    """
+
+    hand_wrist = hand_landmarks[HAND_WRIST]
+
+    dx = hand_wrist.x - pose_wrist.x
+    dy = hand_wrist.y - pose_wrist.y
+
+    distance = np.sqrt(
+        dx ** 2 + dy ** 2
+    )
+
+    return float(distance)
+
+
+def select_hand_near_pose_wrist(
+    hand_result,
+    pose_wrist,
+    maximum_distance
+):
+    """
+    Selecciona la mano más cercana a la muñeca del brazo elegido.
+
+    Esto evita depender exclusivamente de la etiqueta Left/Right
+    de Hand Landmarker cuando la imagen se muestra como espejo.
+    """
+
+    if not hand_result.hand_landmarks:
+        return None, None, None
+
+    nearest_hand = None
+    nearest_hand_index = None
+    nearest_distance = float("inf")
+
+    for hand_index, hand_landmarks in enumerate(
+        hand_result.hand_landmarks
+    ):
+
+        distance = calculate_wrist_distance(
+            hand_landmarks,
+            pose_wrist
+        )
+
+        if distance < nearest_distance:
+
+            nearest_distance = distance
+            nearest_hand = hand_landmarks
+            nearest_hand_index = hand_index
+
+    if nearest_distance > maximum_distance:
+
+        return (
+            None,
+            None,
+            nearest_distance
+        )
+
+    handedness_label = "Unknown"
+
+    if (
+        hand_result.handedness
+        and nearest_hand_index is not None
+        and nearest_hand_index < len(hand_result.handedness)
+        and hand_result.handedness[nearest_hand_index]
+    ):
+
+        handedness_label = (
+            hand_result
+            .handedness[nearest_hand_index][0]
+            .category_name
+        )
+
+    return (
+        nearest_hand,
+        handedness_label,
+        nearest_distance
+    )
+
+
+def smooth_point(
+    previous_point,
+    current_point,
+    alpha
+):
+    """
+    Suavizado exponencial de un punto 3D.
+
+    salida = alpha * actual + (1 - alpha) * anterior
+    """
+
+    if previous_point is None:
+        return current_point.copy()
+
+    smoothed_point = (
+        alpha * current_point
+        + (1.0 - alpha) * previous_point
+    )
+
+    return smoothed_point
+
+
+def smooth_hand(
+    previous_hand,
+    current_hand,
+    alpha
+):
+    """
+    Aplica suavizado exponencial a los 21 landmarks de la mano.
+    """
+
+    if previous_hand is None:
+        return current_hand.copy()
+
+    smoothed_hand = (
+        alpha * current_hand
+        + (1.0 - alpha) * previous_hand
+    )
+
+    return smoothed_hand
+
+
+def draw_point(
+    image,
+    point,
+    width,
+    height,
+    color,
+    radius=6
+):
+    """
+    Dibuja un punto normalizado sobre la imagen.
+    """
+
+    x_pixel, y_pixel = normalized_to_pixel(
+        point,
+        width,
+        height
+    )
+
+    cv2.circle(
+        image,
+        (x_pixel, y_pixel),
+        radius,
+        color,
+        -1
+    )
+
+
+def draw_line(
+    image,
+    point_a,
+    point_b,
+    width,
+    height,
+    color,
+    thickness=3
+):
+    """
+    Dibuja una línea entre dos puntos normalizados.
+    """
+
+    pixel_a = normalized_to_pixel(
+        point_a,
+        width,
+        height
+    )
+
+    pixel_b = normalized_to_pixel(
+        point_b,
+        width,
+        height
+    )
+
+    cv2.line(
+        image,
+        pixel_a,
+        pixel_b,
+        color,
+        thickness
+    )
+
+
+def format_vector(vector):
+    """
+    Formatea un vector [x, y, z] para mostrarlo en terminal.
+    """
+
+    x = float(vector[0])
+    y = float(vector[1])
+    z = float(vector[2])
+
+    return f"[{x:.5f}, {y:.5f}, {z:.5f}]"
+
+
+def print_robot_coordinates(
+    timestamp_ms,
+    shoulder,
+    elbow,
+    wrist,
+    hand
+):
+    """
+    Imprime las coordenadas detectadas.
+
+    shoulder:
+        Arreglo con forma (3,).
+
+    elbow:
+        Arreglo con forma (3,).
+
+    wrist:
+        Arreglo con forma (3,).
+
+    hand:
+        Arreglo con forma (21, 3).
+    """
+
+    print("\n" + "=" * 70)
+    print(f"Timestamp: {timestamp_ms} ms")
+    print(f"Brazo seleccionado: {TARGET_ARM.upper()}")
+
+    print(
+        f"shoulder = {format_vector(shoulder)}"
+    )
+
+    print(
+        f"elbow    = {format_vector(elbow)}"
+    )
+
+    print(
+        f"wrist    = {format_vector(wrist)}"
+    )
+
+    print("hand = [")
+
+    for index, landmark in enumerate(hand):
+
+        print(
+            f"    {index:02d}: "
+            f"{format_vector(landmark)}"
+        )
+
+    print("]")
+
+
+# ============================================================
+# CONEXIONES DE LA MANO PARA DIBUJAR
+# ============================================================
+
+HAND_CONNECTIONS = [
+    # Pulgar
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 4),
+
+    # Índice
+    (0, 5),
+    (5, 6),
+    (6, 7),
+    (7, 8),
+
+    # Dedo medio
+    (5, 9),
+    (9, 10),
+    (10, 11),
+    (11, 12),
+
+    # Anular
+    (9, 13),
+    (13, 14),
+    (14, 15),
+    (15, 16),
+
+    # Meñique
+    (13, 17),
+    (17, 18),
+    (18, 19),
+    (19, 20),
+
+    # Base de la palma
+    (0, 17)
+]
+
+
+# ============================================================
+# INICIAR CÁMARA
+# ============================================================
+
+
+# ============================================================
+# INICIAR CÁMARA
+# ============================================================
+
+# Use Video4Linux2 (V4L2) on Linux, or let OpenCV auto-detect by passing just the index
+cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
+
+# Fallback if V4L2 isn't explicitly required/available
+if not cap.isOpened():
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+
+cap.set(
+    cv2.CAP_PROP_FRAME_WIDTH,
+    CAMERA_WIDTH
+)
+
+cap.set(
+    cv2.CAP_PROP_FRAME_HEIGHT,
+    CAMERA_HEIGHT
+)
+
+cap.set(
+    cv2.CAP_PROP_FPS,
+    CAMERA_FPS
+)
+
+if not cap.isOpened():
+
+    raise RuntimeError(
+        "No se pudo abrir la cámara."
+    )
+
+
+# ============================================================
+# MOSTRAR CONFIGURACIÓN REAL DE LA CÁMARA
+# ============================================================
+
+actual_width = int(
+    cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+)
+
+actual_height = int(
+    cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+)
+
+actual_fps = cap.get(
+    cv2.CAP_PROP_FPS
+)
+
+print("=" * 70)
+print("Cámara iniciada")
+print(f"Resolución reportada: {actual_width} x {actual_height}")
+print(f"FPS reportados: {actual_fps:.2f}")
+print(f"Brazo objetivo: {TARGET_ARM.upper()}")
+print(f"Pose model: {POSE_MODEL}")
+print(f"Hand model: {HAND_MODEL}")
+print("=" * 70)
+
+
+# ============================================================
+# VARIABLES DE TIEMPO Y SUAVIZADO
+# ============================================================
+
+program_start_time = time.perf_counter()
+
+last_timestamp_ms = -1
+last_print_time = 0.0
+
+previous_shoulder = None
+previous_elbow = None
+previous_wrist = None
+previous_hand = None
+
+fps_counter = 0
+fps_display = 0.0
+fps_start_time = time.perf_counter()
+
+
+# ============================================================
+# CREAR DETECTORES
+# ============================================================
+
+pose_detector = vision.PoseLandmarker.create_from_options(
+    pose_options
+)
+
+hand_detector = vision.HandLandmarker.create_from_options(
+    hand_options
+)
+
+
+# ============================================================
+# BUCLE PRINCIPAL
+# ============================================================
+
+try:
+
+    while True:
+
+        success, frame = cap.read()
+
+        if not success:
+
+            print(
+                "ERROR: No se pudo obtener una imagen "
+                "de la cámara."
+            )
+
+            break
+
+        # ----------------------------------------------------
+        # VISTA ESPEJO
+        # ----------------------------------------------------
+
+        frame = cv2.flip(
+            frame,
+            1
+        )
+
+        height, width, _ = frame.shape
+
+        # ----------------------------------------------------
+        # CALCULAR FPS REALES DEL PROGRAMA
+        # ----------------------------------------------------
+
+        fps_counter += 1
+
+        fps_current_time = time.perf_counter()
+        fps_elapsed_time = (
+            fps_current_time - fps_start_time
+        )
+
+        if fps_elapsed_time >= 1.0:
+
+            fps_display = (
+                fps_counter / fps_elapsed_time
+            )
+
+            fps_counter = 0
+            fps_start_time = fps_current_time
+
+        # ----------------------------------------------------
+        # TIMESTAMP MONÓTONO
+        # ----------------------------------------------------
+
+        elapsed_seconds = (
+            time.perf_counter()
+            - program_start_time
+        )
+
+        timestamp_ms = int(
+            elapsed_seconds * 1000
+        )
+
+        # MediaPipe en modo VIDEO necesita timestamps
+        # estrictamente crecientes.
+        if timestamp_ms <= last_timestamp_ms:
+
+            timestamp_ms = (
+                last_timestamp_ms + 1
+            )
+
+        last_timestamp_ms = timestamp_ms
+
+        # ----------------------------------------------------
+        # CONVERTIR OPENCV BGR A RGB
+        # ----------------------------------------------------
+
+        rgb_frame = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2RGB
+        )
+
+        rgb_frame = np.ascontiguousarray(
+            rgb_frame
+        )
+
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=rgb_frame
+        )
+
+        # ----------------------------------------------------
+        # DETECCIÓN EN MODO VIDEO
+        # ----------------------------------------------------
+
+        pose_result = pose_detector.detect_for_video(
+            mp_image,
+            timestamp_ms
+        )
+
+        hand_result = hand_detector.detect_for_video(
+            mp_image,
+            timestamp_ms
+        )
+
+        # ----------------------------------------------------
+        # VARIABLES DEL FRAME ACTUAL
+        # ----------------------------------------------------
+
+        arm_detected = False
+        selected_hand_detected = False
+
+        shoulder_coordinates = None
+        elbow_coordinates = None
+        wrist_coordinates = None
+        hand_coordinates = None
+
+        hand_label = "Unknown"
+        hand_wrist_distance = None
+
+        # ====================================================
+        # OBTENER SOLAMENTE EL BRAZO SELECCIONADO
+        # ====================================================
+
+        if pose_result.pose_landmarks:
+
+            pose_landmarks = (
+                pose_result.pose_landmarks[0]
+            )
+
+            shoulder_landmark = (
+                pose_landmarks[SHOULDER_INDEX]
+            )
+
+            elbow_landmark = (
+                pose_landmarks[ELBOW_INDEX]
+            )
+
+            wrist_landmark = (
+                pose_landmarks[WRIST_INDEX]
+            )
+
+            shoulder_visible = landmark_is_visible(
+                shoulder_landmark,
+                minimum_visibility=0.2
+            )
+
+            elbow_visible = landmark_is_visible(
+                elbow_landmark,
+                minimum_visibility=0.2
+            )
+
+            wrist_visible = landmark_is_visible(
+                wrist_landmark,
+                minimum_visibility=0.2
+            )
+
+            if (
+                shoulder_visible
+                and elbow_visible
+                and wrist_visible
+            ):
+
+                arm_detected = True
+
+                shoulder_coordinates = (
+                    normalized_landmark_to_array(
+                        shoulder_landmark
+                    )
+                )
+
+                elbow_coordinates = (
+                    normalized_landmark_to_array(
+                        elbow_landmark
+                    )
+                )
+
+                wrist_coordinates = (
+                    normalized_landmark_to_array(
+                        wrist_landmark
+                    )
+                )
+
+                # --------------------------------------------
+                # SELECCIONAR MANO CERCANA A LA MUÑECA
+                # --------------------------------------------
+
+                (
+                    selected_hand,
+                    hand_label,
+                    hand_wrist_distance
+                ) = select_hand_near_pose_wrist(
+                    hand_result,
+                    wrist_landmark,
+                    MAX_HAND_WRIST_DISTANCE
+                )
+
+                if selected_hand is not None:
+
+                    selected_hand_detected = True
+
+                    hand_coordinates = np.array(
+                        [
+                            normalized_landmark_to_array(
+                                landmark
+                            )
+                            for landmark in selected_hand
+                        ],
+                        dtype=np.float32
+                    )
+
+        # ====================================================
+        # SUAVIZADO DEL BRAZO
+        # ====================================================
+
+        if arm_detected:
+
+            if USE_SMOOTHING:
+
+                shoulder_coordinates = smooth_point(
+                    previous_shoulder,
+                    shoulder_coordinates,
+                    SMOOTHING_ALPHA
+                )
+
+                elbow_coordinates = smooth_point(
+                    previous_elbow,
+                    elbow_coordinates,
+                    SMOOTHING_ALPHA
+                )
+
+                wrist_coordinates = smooth_point(
+                    previous_wrist,
+                    wrist_coordinates,
+                    SMOOTHING_ALPHA
+                )
+
+            previous_shoulder = (
+                shoulder_coordinates.copy()
+            )
+
+            previous_elbow = (
+                elbow_coordinates.copy()
+            )
+
+            previous_wrist = (
+                wrist_coordinates.copy()
+            )
+
+        else:
+
+            previous_shoulder = None
+            previous_elbow = None
+            previous_wrist = None
+
+        # ====================================================
+        # SUAVIZADO DE LA MANO
+        # ====================================================
+
+        if selected_hand_detected:
+
+            if USE_SMOOTHING:
+
+                hand_coordinates = smooth_hand(
+                    previous_hand,
+                    hand_coordinates,
+                    SMOOTHING_ALPHA
+                )
+
+            previous_hand = (
+                hand_coordinates.copy()
+            )
+
+        else:
+
+            previous_hand = None
+
+        # ====================================================
+        # DIBUJAR BRAZO
+        # ====================================================
+
+        if arm_detected:
+
+            arm_color = (
+                0,
+                255,
+                0
+            )
+
+            draw_line(
+                frame,
+                shoulder_coordinates,
+                elbow_coordinates,
+                width,
+                height,
+                arm_color,
+                thickness=4
+            )
+
+            draw_line(
+                frame,
+                elbow_coordinates,
+                wrist_coordinates,
+                width,
+                height,
+                arm_color,
+                thickness=4
+            )
+
+            # Hombro
+            draw_point(
+                frame,
+                shoulder_coordinates,
+                width,
+                height,
+                (255, 0, 0),
+                radius=8
+            )
+
+            # Codo
+            draw_point(
+                frame,
+                elbow_coordinates,
+                width,
+                height,
+                (0, 165, 255),
+                radius=8
+            )
+
+            # Muñeca
+            draw_point(
+                frame,
+                wrist_coordinates,
+                width,
+                height,
+                (0, 0, 255),
+                radius=8
+            )
+
+        # ====================================================
+        # DIBUJAR ÚNICAMENTE LA MANO SELECCIONADA
+        # ====================================================
+
+        if selected_hand_detected:
+
+            for (
+                connection_start,
+                connection_end
+            ) in HAND_CONNECTIONS:
+
+                draw_line(
+                    frame,
+                    hand_coordinates[connection_start],
+                    hand_coordinates[connection_end],
+                    width,
+                    height,
+                    (255, 0, 255),
+                    thickness=2
+                )
+
+            for landmark_index, landmark in enumerate(
+                hand_coordinates
+            ):
+
+                point_color = (
+                    0,
+                    255,
+                    255
+                )
+
+                if landmark_index == HAND_WRIST:
+
+                    point_color = (
+                        0,
+                        0,
+                        255
+                    )
+
+                draw_point(
+                    frame,
+                    landmark,
+                    width,
+                    height,
+                    point_color,
+                    radius=4
+                )
+
+        # ====================================================
+        # INFORMACIÓN GENERAL EN PANTALLA
+        # ====================================================
+
+        cv2.putText(
+            frame,
+            f"Brazo objetivo: {TARGET_ARM.upper()}",
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"FPS: {fps_display:.1f}",
+            (width - 150, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.70,
+            (255, 255, 255),
+            2
+        )
+
+        # ====================================================
+        # INFORMACIÓN DEL BRAZO
+        # ====================================================
+
+        if arm_detected:
+
+            cv2.putText(
+                frame,
+                "BRAZO DETECTADO",
+                (20, 70),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.70,
+                (0, 255, 0),
+                2
+            )
+
+            shoulder_x = float(
+                shoulder_coordinates[0]
+            )
+
+            shoulder_y = float(
+                shoulder_coordinates[1]
+            )
+
+            shoulder_z = float(
+                shoulder_coordinates[2]
+            )
+
+            elbow_x = float(
+                elbow_coordinates[0]
+            )
+
+            elbow_y = float(
+                elbow_coordinates[1]
+            )
+
+            elbow_z = float(
+                elbow_coordinates[2]
+            )
+
+            wrist_x = float(
+                wrist_coordinates[0]
+            )
+
+            wrist_y = float(
+                wrist_coordinates[1]
+            )
+
+            wrist_z = float(
+                wrist_coordinates[2]
+            )
+
+            shoulder_text = (
+                f"Shoulder: "
+                f"{shoulder_x:.3f}, "
+                f"{shoulder_y:.3f}, "
+                f"{shoulder_z:.3f}"
+            )
+
+            elbow_text = (
+                f"Elbow: "
+                f"{elbow_x:.3f}, "
+                f"{elbow_y:.3f}, "
+                f"{elbow_z:.3f}"
+            )
+
+            wrist_text = (
+                f"Wrist: "
+                f"{wrist_x:.3f}, "
+                f"{wrist_y:.3f}, "
+                f"{wrist_z:.3f}"
+            )
+
+            cv2.putText(
+                frame,
+                shoulder_text,
+                (20, 105),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 255),
+                2
+            )
+
+            cv2.putText(
+                frame,
+                elbow_text,
+                (20, 135),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 255),
+                2
+            )
+
+            cv2.putText(
+                frame,
+                wrist_text,
+                (20, 165),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 255),
+                2
+            )
+
+        else:
+
+            cv2.putText(
+                frame,
+                "BRAZO NO DETECTADO",
+                (20, 70),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.70,
+                (0, 0, 255),
+                2
+            )
+
+        # ====================================================
+        # INFORMACIÓN DE LA MANO
+        # ====================================================
+
+        if selected_hand_detected:
+
+            cv2.putText(
+                frame,
+                (
+                    "MANO DETECTADA | "
+                    f"MediaPipe: {hand_label}"
+                ),
+                (20, 200),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 0),
+                2
+            )
+
+            hand_wrist_x = float(
+                hand_coordinates[0][0]
+            )
+
+            hand_wrist_y = float(
+                hand_coordinates[0][1]
+            )
+
+            hand_wrist_z = float(
+                hand_coordinates[0][2]
+            )
+
+            hand_wrist_text = (
+                f"Hand wrist: "
+                f"{hand_wrist_x:.3f}, "
+                f"{hand_wrist_y:.3f}, "
+                f"{hand_wrist_z:.3f}"
+            )
+
+            cv2.putText(
+                frame,
+                hand_wrist_text,
+                (20, 230),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 255),
+                2
+            )
+
+            if hand_wrist_distance is not None:
+
+                distance_text = (
+                    "Distancia Pose-Hand: "
+                    f"{hand_wrist_distance:.3f}"
+                )
+
+                cv2.putText(
+                    frame,
+                    distance_text,
+                    (20, 260),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (255, 255, 255),
+                    2
+                )
+
+        else:
+
+            cv2.putText(
+                frame,
+                "MANO DEL BRAZO NO DETECTADA",
+                (20, 200),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 0, 255),
+                2
+            )
+
+        # ====================================================
+        # INSTRUCCIÓN DE SALIDA
+        # ====================================================
+
+        cv2.putText(
+            frame,
+            "ESC: salir",
+            (20, height - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (200, 200, 200),
+            1
+        )
+
+        # ====================================================
+        # IMPRIMIR COORDENADAS EN TERMINAL
+        # ====================================================
+
+        current_time = time.perf_counter()
+
+        if (
+            arm_detected
+            and selected_hand_detected
+            and (
+                current_time - last_print_time
+                >= PRINT_INTERVAL_SECONDS
+            )
+        ):
+
+            print_robot_coordinates(
+                timestamp_ms=timestamp_ms,
+                shoulder=shoulder_coordinates,
+                elbow=elbow_coordinates,
+                wrist=wrist_coordinates,
+                hand=hand_coordinates
+            )
+
+            last_print_time = current_time
+
+        # ====================================================
+        # MOSTRAR VENTANA
+        # ====================================================
+
+        cv2.imshow(
+            "MediaPipe - Control de robot 7-DOF",
+            frame
+        )
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == 27:
+
+            print(
+                "\nPrograma detenido manualmente."
+            )
+
+            break
+
+
+# ============================================================
+# LIBERAR RECURSOS
+# ============================================================
+
+finally:
+
+    cap.release()
+
+    pose_detector.close()
+    hand_detector.close()
+
+    cv2.destroyAllWindows()
+
+    print(
+        "Cámara y detectores cerrados correctamente."
+    )
+    
