@@ -18,11 +18,13 @@ El codigo está dividido en varias secciones, para que sea mas sencillo de modif
     Es el que determina la posición de los landmarks, usa mediapipe & cv2, contiene
     - main.py, controla ciclo de camara, timing, y renderizado
     - processor.py, corre los proceso de mediapie, actualiza la ubicaciond de coordenadas y dibuja el wireform
+    - detector.py, se encarga de inicializar mediapipe
     - utils.py, agrupa los procesos matemáticos, formulas, normalización de distancias
 - Simulaciónd de modelo
     Permite vizualizar el comportamiento que debe presentar el brazo, contiene:
     - Hachi.urdf, define la morfología del brazo
-    - SimulacionURDF.py, genera la vizualización del modelo utilizando swift
+    - SimulacionURDF.py, genera solamente vizualización del modelo utilizando swift
+    - realtimesim.py, permite vizualizar el modelo con lo obtenido con mediapipe
 - Control del brazo IRL
     Toma los datos seriales obtenidos por Modulo de reconcimiento de brazo, y permite el control de los servos del brazo
 - Neural Network

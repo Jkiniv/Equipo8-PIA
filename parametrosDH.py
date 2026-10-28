@@ -10,7 +10,7 @@ robot = rtb.ERobot.URDF(str(urdf_path))
 print(robot)  
 
 # Se define T para cinematida directa e inversa
-T = robot.fkine(robot.qz)  # forward kinematics
+T = robot.fkine(robot.q)  # forward kinematics
 # print(T) 
 T = sm.SE3(0.7, 0.2, 0.1)*sm.SE3.OA([0, 1, 0], [0, 0, -1])
 
