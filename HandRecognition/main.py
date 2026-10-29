@@ -21,9 +21,13 @@ CONFIG = {
     "POSE_DETECTION_CONFIDENCE": 0.2,
     "POSE_PRESENCE_CONFIDENCE": 0.2,
     "POSE_TRACKING_CONFIDENCE": 0.2,
+
     "HAND_DETECTION_CONFIDENCE": 0.2,
     "HAND_PRESENCE_CONFIDENCE": 0.2,
     "HAND_TRACKING_CONFIDENCE": 0.2,
+
+    "NUM_HANDS": 2,
+
     "SMOOTHING_ALPHA": 0.35,
     "MAX_HAND_WRIST_DISTANCE": 0.30,
 }
@@ -82,7 +86,8 @@ try:
 
 # (Optional) Scale the resulting normalized coordinates back up if drawing on the 1280x720 frame,
 # or simply keep everything at 640x360.
-    frame = cv2.flip(frame, 1)
+    # MediaPipe procesará la imagen original para conservar
+    # correctamente el lado anatómico izquierdo y derecho.
     height, width, _ = frame.shape
 
     # Cálculo de FPS
@@ -156,7 +161,13 @@ try:
       )
       last_print_time = now
 
-    cv2.imshow("MediaPipe - Control de robot", frame)
+    # Reflejar solamente la imagen mostrada al usuario.
+    display_frame = cv2.flip(frame, 1)
+
+    cv2.imshow(
+    "MediaPipe - Control de robot",
+    display_frame
+    )
     if (cv2.waitKey(1) & 0xFF) == 27:
       print("\nPrograma detenido por el usuario.")
       break

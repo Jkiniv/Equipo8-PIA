@@ -27,9 +27,13 @@ CONFIG = {
     "POSE_DETECTION_CONFIDENCE": 0.2,
     "POSE_PRESENCE_CONFIDENCE": 0.2,
     "POSE_TRACKING_CONFIDENCE": 0.2,
+
     "HAND_DETECTION_CONFIDENCE": 0.2,
     "HAND_PRESENCE_CONFIDENCE": 0.2,
     "HAND_TRACKING_CONFIDENCE": 0.2,
+
+    "NUM_HANDS": 2,
+
     "SMOOTHING_ALPHA": 0.35,
     "MAX_HAND_WRIST_DISTANCE": 0.30,
 }
@@ -87,7 +91,8 @@ try:
       print("ERROR: Frame vacío de la cámara.")
       break
 
-    frame = cv2.flip(frame, 1)
+    # frame = cv2.flip(frame, 1) 
+    # Nota: Se comenta el volteo horizontal para mantener la coherencia anatómica izquierda/derecha en la simulación y el mapeo de coordenadas.
     height, width, _ = frame.shape
 
     # Cálculo de FPS
@@ -163,8 +168,11 @@ try:
           hand=data["hand"],
       )
       last_print_time = now
-
-    cv2.imshow("MediaPipe - Control de robot", frame)
+    display_frame = cv2.flip(frame, 1)
+    cv2.imshow(
+    "MediaPipe - Control de robot",
+    display_frame
+    )
     if (cv2.waitKey(1) & 0xFF) == 27:
       print("\nPrograma detenido por el usuario.")
       break
