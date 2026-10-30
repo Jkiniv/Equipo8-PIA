@@ -58,6 +58,26 @@ robot = rtb.ERobot.URDF(str(urdf_path))
 
 print(robot)
 
+if robot.n < 7:
+    raise RuntimeError(
+        "El URDF debe contener al menos 7 joints."
+    )
+
+qlim = robot.qlim
+
+print("=" * 70)
+print("Limites articulares")
+
+for joint_index in range(robot.n):
+    unit = "m" if joint_index in (5, 6) else "rad"
+    print(
+        f"Joint {joint_index + 1}: "
+        f"{qlim[0, joint_index]:+.4f} a "
+        f"{qlim[1, joint_index]:+.4f} {unit}"
+    )
+
+print("=" * 70)
+
 
 # ============================================================
 # INICIAR SWIFT
@@ -71,8 +91,6 @@ env.add(robot)
 # ============================================================
 # OBTENER LÍMITES ARTICULARES
 # ============================================================
-
-qlim = robot.qlim
 
 steps = STEPS
 t = np.linspace(0, 2 * np.pi, steps)

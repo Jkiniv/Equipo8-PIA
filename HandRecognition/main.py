@@ -46,9 +46,9 @@ CONFIG = {
     # --------------------------------------------------------
     # MediaPipe Pose
     # --------------------------------------------------------
-    "POSE_DETECTION_CONFIDENCE": 0.2,
-    "POSE_PRESENCE_CONFIDENCE": 0.2,
-    "POSE_TRACKING_CONFIDENCE": 0.2,
+    "POSE_DETECTION_CONFIDENCE": 0.4,
+    "POSE_PRESENCE_CONFIDENCE": 0.4,
+    "POSE_TRACKING_CONFIDENCE": 0.4,
 
     # --------------------------------------------------------
     # MediaPipe Hand
@@ -85,9 +85,11 @@ CONFIG = {
     # --------------------------------------------------------
     # Validación y tolerancia
     # --------------------------------------------------------
-    "LANDMARK_VISIBILITY_THRESHOLD": 0.20,
+    "LANDMARK_VISIBILITY_THRESHOLD": 0.30,
     "ARM_LOST_FRAME_TOLERANCE": 5,
     "HAND_LOST_FRAME_TOLERANCE": 5,
+    "TORSO_LOST_FRAME_TOLERANCE": 5,
+    "LOST_FRAME_TOLERANCE": 5,
 
     # --------------------------------------------------------
     # Visualización
@@ -116,6 +118,40 @@ CONFIG = {
     # Pose Landmarker, Hand Landmarker y el procesador.
     "SHOW_PROCESSING_TIME": True,
 }
+
+REQUIRED_CONFIG_KEYS = {
+    "POSE_DETECTION_CONFIDENCE",
+    "POSE_PRESENCE_CONFIDENCE",
+    "POSE_TRACKING_CONFIDENCE",
+    "HAND_DETECTION_CONFIDENCE",
+    "HAND_PRESENCE_CONFIDENCE",
+    "HAND_TRACKING_CONFIDENCE",
+    "CAMERA_WIDTH",
+    "CAMERA_HEIGHT",
+    "CAMERA_FPS",
+    "PROCESSING_WIDTH",
+    "PROCESSING_HEIGHT",
+    "DEBUG_PRINT_COORDINATES",
+    "PRINT_INTERVAL_SECONDS",
+    "SHOW_PROCESSING_TIME",
+}
+
+
+def validate_config(config, required_keys, config_name):
+    missing_keys = sorted(
+        key
+        for key in required_keys
+        if key not in config
+    )
+
+    if missing_keys:
+        raise KeyError(
+            f"Faltan claves en {config_name}: "
+            + ", ".join(missing_keys)
+        )
+
+
+validate_config(CONFIG, REQUIRED_CONFIG_KEYS, "main.py")
 
 
 # ============================================================

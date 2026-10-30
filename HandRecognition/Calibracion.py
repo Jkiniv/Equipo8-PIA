@@ -63,6 +63,47 @@ CONFIG = {
     "ELBOW_PREVIEW_MAX_DEG": 90.0,
 }
 
+REQUIRED_CONFIG_KEYS = {
+    "POSE_DETECTION_CONFIDENCE",
+    "POSE_PRESENCE_CONFIDENCE",
+    "POSE_TRACKING_CONFIDENCE",
+    "HAND_DETECTION_CONFIDENCE",
+    "HAND_PRESENCE_CONFIDENCE",
+    "HAND_TRACKING_CONFIDENCE",
+    "CAMERA_WIDTH",
+    "CAMERA_HEIGHT",
+    "CAMERA_FPS",
+    "PROCESSING_WIDTH",
+    "PROCESSING_HEIGHT",
+    "ARM_CALIBRATION_SAMPLES",
+    "MIN_SHOULDER_CALIBRATION_RANGE_DEG",
+    "MIN_ELBOW_CALIBRATION_RANGE_DEG",
+    "ARM_PREVIEW_SMOOTHING_ALPHA",
+    "ARM_DEAD_ZONE_DEG",
+    "ARM_POSE_VALIDATION_TOLERANCE_DEG",
+    "SHOULDER_PREVIEW_MIN_DEG",
+    "SHOULDER_PREVIEW_MAX_DEG",
+    "ELBOW_PREVIEW_MIN_DEG",
+    "ELBOW_PREVIEW_MAX_DEG",
+}
+
+
+def validate_config(config, required_keys, config_name):
+    missing_keys = sorted(
+        key
+        for key in required_keys
+        if key not in config
+    )
+
+    if missing_keys:
+        raise KeyError(
+            f"Faltan claves en {config_name}: "
+            + ", ".join(missing_keys)
+        )
+
+
+validate_config(CONFIG, REQUIRED_CONFIG_KEYS, "Calibracion.py")
+
 
 def open_camera(camera_index):
     system_name = platform.system().lower()
