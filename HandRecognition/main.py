@@ -82,7 +82,7 @@ CONFIG = {
     # --------------------------------------------------------
     "SMOOTHING_ALPHA": 0.35,
     "MAX_HAND_WRIST_DISTANCE": 0.30,
-        # --------------------------------------------------------
+    # --------------------------------------------------------
     # Validación y tolerancia
     # --------------------------------------------------------
     "LANDMARK_VISIBILITY_THRESHOLD": 0.20,
@@ -98,6 +98,13 @@ CONFIG = {
     # True muestra los 21 landmarks.
     # False muestra únicamente muñeca, pulgar, índice y medio.
     "DRAW_FULL_HAND": False,
+    "TORSO_LOST_FRAME_TOLERANCE": 5,
+
+    "DRAW_TORSO": True,
+    "DRAW_TORSO_AXES": True,
+
+    # Longitud visual de los ejes normalizados.
+    "TORSO_AXIS_LENGTH": 0.12,
 
     # --------------------------------------------------------
     # Diagnóstico

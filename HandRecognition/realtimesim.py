@@ -50,6 +50,13 @@ CONFIG = {
     "DRAW_ARM": True,
     "DRAW_HAND": True,
     "DRAW_FULL_HAND": False,
+    "TORSO_LOST_FRAME_TOLERANCE": 5,
+
+    "DRAW_TORSO": True,
+    "DRAW_TORSO_AXES": True,
+
+    # Longitud visual de los ejes normalizados.
+    "TORSO_AXIS_LENGTH": 0.12,
     "DEBUG_PRINT_COORDINATES": False,
     "PRINT_INTERVAL_SECONDS": 1.0,
     "SHOW_PROCESSING_TIME": True,
