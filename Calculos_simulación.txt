@@ -1,0 +1,367 @@
+# Fundamento de cálculo del sistema
+
+## MediaPipe Pose
+
+El sistema utiliza Pose Landmarker para obtener landmarks del cuerpo.
+
+Se utilizan dos representaciones:
+
+### Landmarks normalizados
+
+Se emplean para:
+
+- dibujar puntos y líneas sobre la cámara;
+- asociar visualmente la mano con la muñeca;
+- mostrar el torso;
+- mostrar el brazo;
+- mostrar los ejes corporales.
+
+### Pose World Landmarks
+
+Se emplean para:
+
+- construir la referencia tridimensional del torso;
+- calcular la orientación del brazo;
+- calcular la flexión del codo;
+- reducir la distorsión producida por coordenadas normalizadas;
+- realizar la calibración del hombro y del codo.
+
+## Landmarks corporales utilizados
+
+11:
+Hombro izquierdo.
+
+12:
+Hombro derecho.
+
+13:
+Codo izquierdo.
+
+14:
+Codo derecho.
+
+15:
+Muñeca izquierda.
+
+16:
+Muñeca derecha.
+
+23:
+Cadera izquierda.
+
+24:
+Cadera derecha.
+
+## Referencia del torso
+
+El centro de hombros se calcula como:
+
+shoulder_center =
+(left_shoulder + right_shoulder) / 2
+
+El centro de caderas se calcula como:
+
+hip_center =
+(left_hip + right_hip) / 2
+
+El eje lateral del cuerpo se calcula desde el hombro izquierdo al derecho:
+
+body_right =
+normalize(right_shoulder - left_shoulder)
+
+El eje vertical aproximado se obtiene desde las caderas hacia los hombros:
+
+body_up_approx =
+normalize(shoulder_center - hip_center)
+
+El eje frontal se calcula mediante producto cruz:
+
+body_forward =
+normalize(cross(body_right, body_up_approx))
+
+El eje vertical se vuelve a ortogonalizar:
+
+body_up =
+normalize(cross(body_forward, body_right))
+
+Estos tres vectores forman una base corporal ortogonal.
+
+## Transformación del brazo al torso
+
+El vector del brazo superior es:
+
+upper_arm =
+elbow_world - shoulder_world
+
+El vector del antebrazo es:
+
+forearm =
+wrist_world - elbow_world
+
+Cada vector se proyecta sobre los ejes del torso:
+
+upper_arm_body = [
+    dot(upper_arm, body_right),
+    dot(upper_arm, body_up),
+    dot(upper_arm, body_forward)
+]
+
+De esta forma, el movimiento se interpreta respecto al cuerpo y no
+directamente respecto a la cámara.
+
+## Elevación del hombro
+
+La elevación cruda se calcula utilizando:
+
+- componente lateral;
+- componente vertical hacia abajo.
+
+La postura C define el cero del hombro.
+
+La postura H define la referencia de 90 grados.
+
+El valor normalizado es:
+
+shoulder_normalized =
+(current_shoulder - neutral_shoulder)
+/
+(horizontal_shoulder - neutral_shoulder)
+
+Después se limita entre 0 y 1:
+
+shoulder_normalized =
+clip(shoulder_normalized, 0, 1)
+
+El objetivo del hombro es:
+
+shoulder_target =
+shoulder_normalized * 90 grados
+
+## Plano de movimiento del hombro
+
+El plano del hombro se obtiene mediante la relación entre:
+
+- desplazamiento lateral;
+- desplazamiento frente/atrás.
+
+Este valor controla el joint 1.
+
+Cuando el brazo está casi hacia abajo, el plano es geométricamente
+inestable. Por eso no se actualiza mientras la elevación sea menor
+que un umbral configurable.
+
+El plano final puede modificarse mediante:
+
+SHOULDER_PLANE_SIGN
+
+y:
+
+SHOULDER_PLANE_OFFSET_DEG
+
+El offset permite orientar el robot hacia el lado opuesto sin modificar
+la calibración humana.
+
+## Flexión del codo
+
+Los vectores se construyen desde el codo:
+
+elbow_to_shoulder =
+shoulder_world - elbow_world
+
+elbow_to_wrist =
+wrist_world - elbow_world
+
+El ángulo interno se obtiene con:
+
+cosine =
+dot(elbow_to_shoulder, elbow_to_wrist)
+/
+(norm(elbow_to_shoulder) * norm(elbow_to_wrist))
+
+internal_angle =
+arccos(clip(cosine, -1, 1))
+
+La flexión es:
+
+elbow_flexion =
+pi - internal_angle
+
+Interpretación:
+
+Brazo recto:
+flexión cercana a 0 grados.
+
+Codo a 90 grados:
+flexión cercana a 90 grados.
+
+## Cero dinámico del codo
+
+MediaPipe puede reportar distintos valores residuales de flexión cuando
+el brazo recto cambia de elevación.
+
+Por eso se registran dos referencias rectas:
+
+C:
+Brazo abajo y recto.
+
+H:
+Brazo horizontal y recto.
+
+El progreso del hombro entre C y H es:
+
+shoulder_progress =
+(current_shoulder - neutral_shoulder)
+/
+(horizontal_shoulder - neutral_shoulder)
+
+El cero esperado del codo se interpola:
+
+dynamic_elbow_zero =
+interpolate(
+    shoulder_progress,
+    neutral_elbow,
+    horizontal_elbow
+)
+
+Después, la flexión calibrada se calcula respecto a ese cero dinámico.
+
+La postura E define la referencia flexionada.
+
+El rango del codo es:
+
+elbow_range =
+elbow_E - elbow_H
+
+El valor normalizado es:
+
+elbow_normalized =
+(current_elbow - dynamic_elbow_zero)
+/
+elbow_range
+
+El objetivo final es:
+
+elbow_target =
+clip(elbow_normalized, 0, 1) * 90 grados
+
+## Suavizado del brazo
+
+Se utiliza un filtro exponencial:
+
+filtered =
+alpha * current
++
+(1 - alpha) * previous
+
+Un alpha bajo genera mayor estabilidad.
+
+Un alpha alto genera una respuesta más rápida.
+
+## Zona muerta
+
+Los valores pequeños próximos a cero se convierten en cero para evitar
+que el robot tiemble en la postura neutral.
+
+## Cálculo de apertura de la mano
+
+Se utilizan estos landmarks:
+
+0:
+Muñeca.
+
+2:
+Base del pulgar.
+
+4:
+Punta del pulgar.
+
+5:
+Base del índice.
+
+8:
+Punta del índice.
+
+9:
+Base del dedo medio.
+
+12:
+Punta del dedo medio.
+
+El tamaño de la palma se estima con:
+
+palm_size =
+norm(middle_mcp - wrist)
+
+Se calculan:
+
+thumb_index_distance =
+norm(thumb_tip - index_tip) / palm_size
+
+index_extension =
+norm(index_tip - index_mcp) / palm_size
+
+middle_extension =
+norm(middle_tip - middle_mcp) / palm_size
+
+La apertura cruda es:
+
+raw_openness =
+0.40 * thumb_index_distance
++
+0.30 * index_extension
++
+0.30 * middle_extension
+
+## Calibración de la garra
+
+F registra la mediana de 30 muestras con la mano cerrada.
+
+O registra la mediana de 30 muestras con la mano abierta.
+
+La apertura normalizada es:
+
+openness =
+(raw_openness - closed_value)
+/
+(open_value - closed_value)
+
+El resultado se limita entre 0 y 1.
+
+## Control de los dedos
+
+Joint 6:
+Dedo izquierdo, de 0 a +0.04 metros.
+
+Joint 7:
+Dedo derecho, de 0 a -0.04 metros.
+
+Para el dedo izquierdo:
+
+left_target =
+interpolate(
+    openness,
+    0..1,
+    joint_6_min..joint_6_max
+)
+
+Para el dedo derecho:
+
+right_target =
+interpolate(
+    openness,
+    0..1,
+    joint_7_max..joint_7_min
+)
+
+Esto hace que ambos dedos se abran simultáneamente en direcciones
+opuestas.
+
+## Seguridad y límites
+
+Antes de actualizar Swift, todos los joints se limitan mediante:
+
+q_target =
+clip(q_target, robot.qlim[0], robot.qlim[1])
+
+Cuando se pierde temporalmente la detección, el robot mantiene la última
+posición válida.
