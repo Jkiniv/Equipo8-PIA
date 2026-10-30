@@ -13,24 +13,17 @@ from utils import (
 )
 
 
-# ============================================================
-# INDICES DE POSE LANDMARKER
-# ============================================================
+# Pose Landmarker indices
+LEFT_SHOULDER = 11
+RIGHT_SHOULDER = 12
+LEFT_ELBOW = 13
+RIGHT_ELBOW = 14
+LEFT_WRIST = 15
+RIGHT_WRIST = 16
+LEFT_HIP = 23
+RIGHT_HIP = 24
 
-POSE_LEFT_SHOULDER = 11
-POSE_RIGHT_SHOULDER = 12
-POSE_LEFT_ELBOW = 13
-POSE_RIGHT_ELBOW = 14
-POSE_LEFT_WRIST = 15
-POSE_RIGHT_WRIST = 16
-POSE_LEFT_HIP = 23
-POSE_RIGHT_HIP = 24
-
-
-# ============================================================
-# LANDMARKS UTILIZADOS PARA CONTROLAR LA GARRA
-# ============================================================
-
+# Hand Landmarker indices used by the gripper
 HAND_WRIST = 0
 THUMB_MCP = 2
 THUMB_TIP = 4
@@ -60,12 +53,15 @@ HAND_CONTROL_CONNECTIONS = (
 )
 
 
-# ============================================================
-# FUNCIONES AUXILIARES
-# ============================================================
+def world_landmark_to_array(landmark):
+    """Convert a MediaPipe world landmark to a float32 xyz array."""
+    return np.asarray(
+        [landmark.x, landmark.y, landmark.z],
+        dtype=np.float32,
+    )
+
 
 def normalize_vector(vector, minimum_norm=1e-6):
-    """Normaliza un vector 3D o devuelve None si es degenerado."""
     vector = np.asarray(vector, dtype=np.float32)
     norm = float(np.linalg.norm(vector))
     if norm <= minimum_norm:
@@ -79,45 +75,22 @@ def build_torso_reference(
     left_hip,
     right_hip,
 ):
-    """Construye una base ortonormal ligada al torso.
-
-    body_right:
-        Desde el hombro izquierdo hacia el derecho.
-
-    body_up:
-        Desde el centro de las caderas hacia el centro de hombros.
-
-    body_forward:
-        Perpendicular al plano torso, calculado con producto cruz.
-
-    La base se recalcula en cada frame para seguir rotaciones e
-    inclinaciones moderadas del torso.
-    """
+    """Build an orthonormal torso reference from four 3D points."""
     shoulder_center = 0.5 * (left_shoulder + right_shoulder)
     hip_center = 0.5 * (left_hip + right_hip)
 
     body_right = normalize_vector(right_shoulder - left_shoulder)
     body_up_approx = normalize_vector(shoulder_center - hip_center)
-
     if body_right is None or body_up_approx is None:
         return None
 
-    # Y corporal: perpendicular al eje lateral, pero contenido
-    # en el plano definido por el torso.
     body_forward = normalize_vector(np.cross(body_right, body_up_approx))
     if body_forward is None:
         return None
 
-    # Re-ortogonalizar el eje vertical para reducir ruido y sesgo.
     body_up = normalize_vector(np.cross(body_forward, body_right))
     if body_up is None:
         return None
-
-    # Matriz cuyas columnas son los ejes corporales expresados
-    # en coordenadas de camara.
-    body_rotation = np.column_stack(
-        (body_right, body_up, body_forward)
-    ).astype(np.float32)
 
     return {
         "shoulder_center": shoulder_center.astype(np.float32),
@@ -125,25 +98,25 @@ def build_torso_reference(
         "body_right": body_right.astype(np.float32),
         "body_up": body_up.astype(np.float32),
         "body_forward": body_forward.astype(np.float32),
-        "body_rotation": body_rotation,
+        "body_rotation": np.column_stack(
+            (body_right, body_up, body_forward)
+        ).astype(np.float32),
     }
 
 
-def transform_vector_to_body(vector, body_right, body_up, body_forward):
-    """Proyecta un vector de camara sobre los ejes del torso."""
+def transform_vector_to_body(vector, torso_reference):
     vector = np.asarray(vector, dtype=np.float32)
     return np.asarray(
         [
-            np.dot(vector, body_right),
-            np.dot(vector, body_up),
-            np.dot(vector, body_forward),
+            np.dot(vector, torso_reference["body_right"]),
+            np.dot(vector, torso_reference["body_up"]),
+            np.dot(vector, torso_reference["body_forward"]),
         ],
         dtype=np.float32,
     )
 
 
 def extract_hand_control_points(hand_landmarks):
-    """Extrae los puntos usados para calcular apertura de la garra."""
     return {
         index: normalized_landmark_to_array(hand_landmarks[index])
         for index in HAND_CONTROL_INDICES
@@ -151,7 +124,6 @@ def extract_hand_control_points(hand_landmarks):
 
 
 def smooth_hand_control_points(previous_points, current_points, alpha):
-    """Suaviza solamente los puntos usados para la garra."""
     if previous_points is None:
         return {
             index: point.copy()
@@ -159,17 +131,12 @@ def smooth_hand_control_points(previous_points, current_points, alpha):
         }
 
     return {
-        index: smooth_point(
-            previous_points.get(index),
-            point,
-            alpha,
-        )
+        index: smooth_point(previous_points.get(index), point, alpha)
         for index, point in current_points.items()
     }
 
 
 def calculate_raw_hand_openness(control_points):
-    """Calcula una medida continua de apertura sin calibrar."""
     wrist = control_points[HAND_WRIST]
     thumb_tip = control_points[THUMB_TIP]
     index_mcp = control_points[INDEX_MCP]
@@ -181,26 +148,16 @@ def calculate_raw_hand_openness(control_points):
     if palm_size <= 1e-6:
         return None
 
-    thumb_index_distance = (
-        np.linalg.norm(thumb_tip - index_tip) / palm_size
-    )
-    index_extension = (
-        np.linalg.norm(index_tip - index_mcp) / palm_size
-    )
-    middle_extension = (
-        np.linalg.norm(middle_tip - middle_mcp) / palm_size
-    )
+    thumb_index = np.linalg.norm(thumb_tip - index_tip) / palm_size
+    index_extension = np.linalg.norm(index_tip - index_mcp) / palm_size
+    middle_extension = np.linalg.norm(middle_tip - middle_mcp) / palm_size
 
     return float(
-        0.40 * thumb_index_distance
+        0.40 * thumb_index
         + 0.30 * index_extension
         + 0.30 * middle_extension
     )
 
-
-# ============================================================
-# PROCESADOR PRINCIPAL
-# ============================================================
 
 class ArmHandProcessor:
     def __init__(
@@ -217,26 +174,24 @@ class ArmHandProcessor:
         self.use_smoothing = use_smoothing
 
         self.smoothing_alpha = config.get("SMOOTHING_ALPHA", 0.35)
-        self.max_hand_distance = config.get(
-            "MAX_HAND_WRIST_DISTANCE",
-            0.30,
-        )
+        self.max_hand_distance = config.get("MAX_HAND_WRIST_DISTANCE", 0.30)
         self.visibility_threshold = config.get(
             "LANDMARK_VISIBILITY_THRESHOLD",
             0.20,
         )
 
-        self.arm_lost_frame_tolerance = config.get(
+        default_tolerance = config.get("LOST_FRAME_TOLERANCE", 5)
+        self.arm_tolerance = config.get(
             "ARM_LOST_FRAME_TOLERANCE",
-            config.get("LOST_FRAME_TOLERANCE", 5),
+            default_tolerance,
         )
-        self.hand_lost_frame_tolerance = config.get(
+        self.hand_tolerance = config.get(
             "HAND_LOST_FRAME_TOLERANCE",
-            config.get("LOST_FRAME_TOLERANCE", 5),
+            default_tolerance,
         )
-        self.torso_lost_frame_tolerance = config.get(
+        self.torso_tolerance = config.get(
             "TORSO_LOST_FRAME_TOLERANCE",
-            config.get("LOST_FRAME_TOLERANCE", 5),
+            default_tolerance,
         )
 
         self.draw_arm = config.get("DRAW_ARM", True)
@@ -244,61 +199,42 @@ class ArmHandProcessor:
         self.draw_full_hand = config.get("DRAW_FULL_HAND", False)
         self.draw_torso = config.get("DRAW_TORSO", True)
         self.draw_torso_axes = config.get("DRAW_TORSO_AXES", True)
-        self.torso_axis_length = float(
-            config.get("TORSO_AXIS_LENGTH", 0.12)
-        )
+        self.torso_axis_length = float(config.get("TORSO_AXIS_LENGTH", 0.12))
 
         if self.target_arm == "left":
-            self.shoulder_idx = POSE_LEFT_SHOULDER
-            self.elbow_idx = POSE_LEFT_ELBOW
-            self.wrist_idx = POSE_LEFT_WRIST
+            self.shoulder_idx = LEFT_SHOULDER
+            self.elbow_idx = LEFT_ELBOW
+            self.wrist_idx = LEFT_WRIST
         elif self.target_arm == "right":
-            self.shoulder_idx = POSE_RIGHT_SHOULDER
-            self.elbow_idx = POSE_RIGHT_ELBOW
-            self.wrist_idx = POSE_RIGHT_WRIST
+            self.shoulder_idx = RIGHT_SHOULDER
+            self.elbow_idx = RIGHT_ELBOW
+            self.wrist_idx = RIGHT_WRIST
         else:
             raise ValueError('TARGET_ARM debe ser "left" o "right".')
 
         self.hand_wrist_idx = HAND_WRIST
-
-        # Brazo.
-        self.prev_shoulder = None
-        self.prev_elbow = None
-        self.prev_wrist = None
-        self.arm_lost_frames = 0
-
-        # Torso.
-        self.prev_left_shoulder = None
-        self.prev_right_shoulder = None
-        self.prev_left_hip = None
-        self.prev_right_hip = None
-        self.last_torso_reference = None
-        self.torso_lost_frames = 0
-
-        # Mano.
-        self.prev_hand_control = None
-        self.last_full_hand = None
-        self.last_hand_label = "Unknown"
-        self.last_hand_distance = None
-        self.last_raw_hand_openness = None
-        self.hand_lost_frames = 0
-
-        # Tiempos.
         self.pose_time_ms = 0.0
         self.hand_time_ms = 0.0
         self.postprocess_time_ms = 0.0
+        self.reset_smoothing()
 
     def reset_smoothing(self):
-        """Elimina los estados temporales del procesador."""
         self.prev_shoulder = None
         self.prev_elbow = None
         self.prev_wrist = None
+        self.prev_shoulder_world = None
+        self.prev_elbow_world = None
+        self.prev_wrist_world = None
         self.arm_lost_frames = 0
 
         self.prev_left_shoulder = None
         self.prev_right_shoulder = None
         self.prev_left_hip = None
         self.prev_right_hip = None
+        self.prev_left_shoulder_world = None
+        self.prev_right_shoulder_world = None
+        self.prev_left_hip_world = None
+        self.prev_right_hip_world = None
         self.last_torso_reference = None
         self.torso_lost_frames = 0
 
@@ -313,275 +249,246 @@ class ArmHandProcessor:
         height, width, _ = frame.shape
 
         pose_start = time.perf_counter()
-        pose_result = self.pose_detector.detect_for_video(
-            mp_image,
-            timestamp_ms,
-        )
-        self.pose_time_ms = (
-            time.perf_counter() - pose_start
-        ) * 1000.0
+        pose_result = self.pose_detector.detect_for_video(mp_image, timestamp_ms)
+        self.pose_time_ms = (time.perf_counter() - pose_start) * 1000.0
 
         hand_start = time.perf_counter()
-        hand_result = self.hand_detector.detect_for_video(
-            mp_image,
-            timestamp_ms,
-        )
-        self.hand_time_ms = (
-            time.perf_counter() - hand_start
-        ) * 1000.0
+        hand_result = self.hand_detector.detect_for_video(mp_image, timestamp_ms)
+        self.hand_time_ms = (time.perf_counter() - hand_start) * 1000.0
 
-        postprocess_start = time.perf_counter()
+        post_start = time.perf_counter()
 
-        arm_detected_current = False
-        hand_detected_current = False
-        torso_detected_current = False
+        arm_current = False
+        hand_current = False
+        torso_current = False
 
-        shoulder_coords = None
-        elbow_coords = None
-        wrist_coords = None
-
-        left_shoulder_coords = None
-        right_shoulder_coords = None
-        left_hip_coords = None
-        right_hip_coords = None
+        shoulder = elbow = wrist = None
+        shoulder_world = elbow_world = wrist_world = None
+        left_shoulder = right_shoulder = left_hip = right_hip = None
+        left_shoulder_world = right_shoulder_world = None
+        left_hip_world = right_hip_world = None
         torso_reference = None
 
-        full_hand_coords = None
-        hand_control_points = None
+        full_hand = None
+        hand_control = None
         hand_label = "Unknown"
         hand_distance = None
         raw_hand_openness = None
 
-        if pose_result.pose_landmarks:
-            pose_landmarks = pose_result.pose_landmarks[0]
-
-            # ------------------------------------------------
-            # TORSO DEL FRAME ACTUAL
-            # ------------------------------------------------
-            left_shoulder_landmark = pose_landmarks[POSE_LEFT_SHOULDER]
-            right_shoulder_landmark = pose_landmarks[POSE_RIGHT_SHOULDER]
-            left_hip_landmark = pose_landmarks[POSE_LEFT_HIP]
-            right_hip_landmark = pose_landmarks[POSE_RIGHT_HIP]
+        if pose_result.pose_landmarks and pose_result.pose_world_landmarks:
+            pose = pose_result.pose_landmarks[0]
+            world = pose_result.pose_world_landmarks[0]
 
             torso_landmarks = (
-                left_shoulder_landmark,
-                right_shoulder_landmark,
-                left_hip_landmark,
-                right_hip_landmark,
+                pose[LEFT_SHOULDER],
+                pose[RIGHT_SHOULDER],
+                pose[LEFT_HIP],
+                pose[RIGHT_HIP],
             )
 
             if all(
-                landmark_is_visible(
-                    landmark,
-                    self.visibility_threshold,
-                )
-                for landmark in torso_landmarks
+                landmark_is_visible(item, self.visibility_threshold)
+                for item in torso_landmarks
             ):
-                left_shoulder_coords = normalized_landmark_to_array(
-                    left_shoulder_landmark
-                )
-                right_shoulder_coords = normalized_landmark_to_array(
-                    right_shoulder_landmark
-                )
-                left_hip_coords = normalized_landmark_to_array(
-                    left_hip_landmark
-                )
-                right_hip_coords = normalized_landmark_to_array(
-                    right_hip_landmark
-                )
+                left_shoulder = normalized_landmark_to_array(pose[LEFT_SHOULDER])
+                right_shoulder = normalized_landmark_to_array(pose[RIGHT_SHOULDER])
+                left_hip = normalized_landmark_to_array(pose[LEFT_HIP])
+                right_hip = normalized_landmark_to_array(pose[RIGHT_HIP])
+
+                left_shoulder_world = world_landmark_to_array(world[LEFT_SHOULDER])
+                right_shoulder_world = world_landmark_to_array(world[RIGHT_SHOULDER])
+                left_hip_world = world_landmark_to_array(world[LEFT_HIP])
+                right_hip_world = world_landmark_to_array(world[RIGHT_HIP])
 
                 if self.use_smoothing:
-                    left_shoulder_coords = smooth_point(
-                        self.prev_left_shoulder,
-                        left_shoulder_coords,
+                    left_shoulder = smooth_point(
+                        self.prev_left_shoulder, left_shoulder, self.smoothing_alpha
+                    )
+                    right_shoulder = smooth_point(
+                        self.prev_right_shoulder, right_shoulder, self.smoothing_alpha
+                    )
+                    left_hip = smooth_point(
+                        self.prev_left_hip, left_hip, self.smoothing_alpha
+                    )
+                    right_hip = smooth_point(
+                        self.prev_right_hip, right_hip, self.smoothing_alpha
+                    )
+                    left_shoulder_world = smooth_point(
+                        self.prev_left_shoulder_world,
+                        left_shoulder_world,
                         self.smoothing_alpha,
                     )
-                    right_shoulder_coords = smooth_point(
-                        self.prev_right_shoulder,
-                        right_shoulder_coords,
+                    right_shoulder_world = smooth_point(
+                        self.prev_right_shoulder_world,
+                        right_shoulder_world,
                         self.smoothing_alpha,
                     )
-                    left_hip_coords = smooth_point(
-                        self.prev_left_hip,
-                        left_hip_coords,
+                    left_hip_world = smooth_point(
+                        self.prev_left_hip_world,
+                        left_hip_world,
                         self.smoothing_alpha,
                     )
-                    right_hip_coords = smooth_point(
-                        self.prev_right_hip,
-                        right_hip_coords,
+                    right_hip_world = smooth_point(
+                        self.prev_right_hip_world,
+                        right_hip_world,
                         self.smoothing_alpha,
                     )
 
                 torso_reference = build_torso_reference(
-                    left_shoulder_coords,
-                    right_shoulder_coords,
-                    left_hip_coords,
-                    right_hip_coords,
+                    left_shoulder_world,
+                    right_shoulder_world,
+                    left_hip_world,
+                    right_hip_world,
                 )
 
                 if torso_reference is not None:
-                    torso_detected_current = True
-                    self.prev_left_shoulder = left_shoulder_coords.copy()
-                    self.prev_right_shoulder = right_shoulder_coords.copy()
-                    self.prev_left_hip = left_hip_coords.copy()
-                    self.prev_right_hip = right_hip_coords.copy()
+                    torso_current = True
+                    self.prev_left_shoulder = left_shoulder.copy()
+                    self.prev_right_shoulder = right_shoulder.copy()
+                    self.prev_left_hip = left_hip.copy()
+                    self.prev_right_hip = right_hip.copy()
+                    self.prev_left_shoulder_world = left_shoulder_world.copy()
+                    self.prev_right_shoulder_world = right_shoulder_world.copy()
+                    self.prev_left_hip_world = left_hip_world.copy()
+                    self.prev_right_hip_world = right_hip_world.copy()
                     self.last_torso_reference = {
                         key: value.copy()
                         for key, value in torso_reference.items()
                     }
                     self.torso_lost_frames = 0
 
-            # ------------------------------------------------
-            # BRAZO OBJETIVO DEL FRAME ACTUAL
-            # ------------------------------------------------
-            shoulder_landmark = pose_landmarks[self.shoulder_idx]
-            elbow_landmark = pose_landmarks[self.elbow_idx]
-            wrist_landmark = pose_landmarks[self.wrist_idx]
+            shoulder_landmark = pose[self.shoulder_idx]
+            elbow_landmark = pose[self.elbow_idx]
+            wrist_landmark = pose[self.wrist_idx]
 
             if (
-                landmark_is_visible(
-                    shoulder_landmark,
-                    self.visibility_threshold,
-                )
-                and landmark_is_visible(
-                    elbow_landmark,
-                    self.visibility_threshold,
-                )
-                and landmark_is_visible(
-                    wrist_landmark,
-                    self.visibility_threshold,
-                )
+                landmark_is_visible(shoulder_landmark, self.visibility_threshold)
+                and landmark_is_visible(elbow_landmark, self.visibility_threshold)
+                and landmark_is_visible(wrist_landmark, self.visibility_threshold)
             ):
-                arm_detected_current = True
-                shoulder_coords = normalized_landmark_to_array(
-                    shoulder_landmark
-                )
-                elbow_coords = normalized_landmark_to_array(
-                    elbow_landmark
-                )
-                wrist_coords = normalized_landmark_to_array(
-                    wrist_landmark
-                )
+                arm_current = True
+                shoulder = normalized_landmark_to_array(shoulder_landmark)
+                elbow = normalized_landmark_to_array(elbow_landmark)
+                wrist = normalized_landmark_to_array(wrist_landmark)
+
+                shoulder_world = world_landmark_to_array(world[self.shoulder_idx])
+                elbow_world = world_landmark_to_array(world[self.elbow_idx])
+                wrist_world = world_landmark_to_array(world[self.wrist_idx])
 
                 if self.use_smoothing:
-                    shoulder_coords = smooth_point(
-                        self.prev_shoulder,
-                        shoulder_coords,
+                    shoulder = smooth_point(
+                        self.prev_shoulder, shoulder, self.smoothing_alpha
+                    )
+                    elbow = smooth_point(self.prev_elbow, elbow, self.smoothing_alpha)
+                    wrist = smooth_point(self.prev_wrist, wrist, self.smoothing_alpha)
+                    shoulder_world = smooth_point(
+                        self.prev_shoulder_world,
+                        shoulder_world,
                         self.smoothing_alpha,
                     )
-                    elbow_coords = smooth_point(
-                        self.prev_elbow,
-                        elbow_coords,
+                    elbow_world = smooth_point(
+                        self.prev_elbow_world,
+                        elbow_world,
                         self.smoothing_alpha,
                     )
-                    wrist_coords = smooth_point(
-                        self.prev_wrist,
-                        wrist_coords,
+                    wrist_world = smooth_point(
+                        self.prev_wrist_world,
+                        wrist_world,
                         self.smoothing_alpha,
                     )
 
-                self.prev_shoulder = shoulder_coords.copy()
-                self.prev_elbow = elbow_coords.copy()
-                self.prev_wrist = wrist_coords.copy()
+                self.prev_shoulder = shoulder.copy()
+                self.prev_elbow = elbow.copy()
+                self.prev_wrist = wrist.copy()
+                self.prev_shoulder_world = shoulder_world.copy()
+                self.prev_elbow_world = elbow_world.copy()
+                self.prev_wrist_world = wrist_world.copy()
                 self.arm_lost_frames = 0
 
-                (
-                    selected_hand,
-                    hand_label,
-                    hand_distance,
-                ) = select_hand_near_pose_wrist(
-                    hand_result,
-                    wrist_landmark,
-                    self.max_hand_distance,
-                    self.hand_wrist_idx,
+                selected_hand, hand_label, hand_distance = (
+                    select_hand_near_pose_wrist(
+                        hand_result,
+                        wrist_landmark,
+                        self.max_hand_distance,
+                        self.hand_wrist_idx,
+                    )
                 )
 
                 if selected_hand is not None:
-                    hand_detected_current = True
-                    full_hand_coords = np.asarray(
+                    hand_current = True
+                    full_hand = np.asarray(
                         [
-                            normalized_landmark_to_array(landmark)
-                            for landmark in selected_hand
+                            normalized_landmark_to_array(item)
+                            for item in selected_hand
                         ],
                         dtype=np.float32,
                     )
-                    hand_control_points = extract_hand_control_points(
-                        selected_hand
-                    )
-
+                    hand_control = extract_hand_control_points(selected_hand)
                     if self.use_smoothing:
-                        hand_control_points = smooth_hand_control_points(
+                        hand_control = smooth_hand_control_points(
                             self.prev_hand_control,
-                            hand_control_points,
+                            hand_control,
                             self.smoothing_alpha,
                         )
-
-                    raw_hand_openness = calculate_raw_hand_openness(
-                        hand_control_points
-                    )
-
+                    raw_hand_openness = calculate_raw_hand_openness(hand_control)
                     self.prev_hand_control = {
                         index: point.copy()
-                        for index, point in hand_control_points.items()
+                        for index, point in hand_control.items()
                     }
-                    self.last_full_hand = full_hand_coords.copy()
+                    self.last_full_hand = full_hand.copy()
                     self.last_hand_label = hand_label
                     self.last_hand_distance = hand_distance
                     self.last_raw_hand_openness = raw_hand_openness
                     self.hand_lost_frames = 0
 
-        # ----------------------------------------------------
-        # TOLERANCIAS DE PERDIDA
-        # ----------------------------------------------------
-        if not torso_detected_current:
+        if not torso_current:
             self.torso_lost_frames += 1
             if (
-                self.torso_lost_frames
-                <= self.torso_lost_frame_tolerance
+                self.torso_lost_frames <= self.torso_tolerance
                 and self.last_torso_reference is not None
             ):
                 torso_reference = {
                     key: value.copy()
                     for key, value in self.last_torso_reference.items()
                 }
-                left_shoulder_coords = self.prev_left_shoulder.copy()
-                right_shoulder_coords = self.prev_right_shoulder.copy()
-                left_hip_coords = self.prev_left_hip.copy()
-                right_hip_coords = self.prev_right_hip.copy()
+                left_shoulder = self.prev_left_shoulder.copy()
+                right_shoulder = self.prev_right_shoulder.copy()
+                left_hip = self.prev_left_hip.copy()
+                right_hip = self.prev_right_hip.copy()
+                left_shoulder_world = self.prev_left_shoulder_world.copy()
+                right_shoulder_world = self.prev_right_shoulder_world.copy()
+                left_hip_world = self.prev_left_hip_world.copy()
+                right_hip_world = self.prev_right_hip_world.copy()
             else:
                 torso_reference = None
-                left_shoulder_coords = None
-                right_shoulder_coords = None
-                left_hip_coords = None
-                right_hip_coords = None
 
-        if not arm_detected_current:
+        if not arm_current:
             self.arm_lost_frames += 1
             if (
-                self.arm_lost_frames <= self.arm_lost_frame_tolerance
+                self.arm_lost_frames <= self.arm_tolerance
                 and self.prev_shoulder is not None
-                and self.prev_elbow is not None
-                and self.prev_wrist is not None
             ):
-                shoulder_coords = self.prev_shoulder.copy()
-                elbow_coords = self.prev_elbow.copy()
-                wrist_coords = self.prev_wrist.copy()
+                shoulder = self.prev_shoulder.copy()
+                elbow = self.prev_elbow.copy()
+                wrist = self.prev_wrist.copy()
+                shoulder_world = self.prev_shoulder_world.copy()
+                elbow_world = self.prev_elbow_world.copy()
+                wrist_world = self.prev_wrist_world.copy()
             else:
-                shoulder_coords = None
-                elbow_coords = None
-                wrist_coords = None
+                shoulder = elbow = wrist = None
+                shoulder_world = elbow_world = wrist_world = None
 
-        if not hand_detected_current:
+        if not hand_current:
             self.hand_lost_frames += 1
             if (
-                self.hand_lost_frames <= self.hand_lost_frame_tolerance
+                self.hand_lost_frames <= self.hand_tolerance
                 and self.prev_hand_control is not None
             ):
-                hand_control_points = {
+                hand_control = {
                     index: point.copy()
                     for index, point in self.prev_hand_control.items()
                 }
-                full_hand_coords = (
+                full_hand = (
                     self.last_full_hand.copy()
                     if self.last_full_hand is not None
                     else None
@@ -590,262 +497,166 @@ class ArmHandProcessor:
                 hand_distance = self.last_hand_distance
                 raw_hand_openness = self.last_raw_hand_openness
             else:
-                hand_control_points = None
-                full_hand_coords = None
+                hand_control = None
+                full_hand = None
                 hand_label = "Unknown"
                 hand_distance = None
                 raw_hand_openness = None
 
-        arm_tracking_valid = all(
-            point is not None
-            for point in (
-                shoulder_coords,
-                elbow_coords,
-                wrist_coords,
-            )
-        )
-        hand_tracking_valid = hand_control_points is not None
-        torso_reference_valid = torso_reference is not None
+        arm_valid = all(item is not None for item in (shoulder, elbow, wrist))
+        hand_valid = hand_control is not None
+        torso_valid = torso_reference is not None
 
-        arm_using_previous = (
-            arm_tracking_valid and not arm_detected_current
-        )
-        hand_using_previous = (
-            hand_tracking_valid and not hand_detected_current
-        )
-        torso_using_previous = (
-            torso_reference_valid and not torso_detected_current
-        )
+        arm_previous = arm_valid and not arm_current
+        hand_previous = hand_valid and not hand_current
+        torso_previous = torso_valid and not torso_current
 
-        # Vectores del brazo expresados en la referencia corporal.
         upper_arm_body = None
         forearm_body = None
-        if arm_tracking_valid and torso_reference_valid:
+        if (
+            arm_valid
+            and torso_valid
+            and shoulder_world is not None
+            and elbow_world is not None
+            and wrist_world is not None
+        ):
             upper_arm_body = transform_vector_to_body(
-                elbow_coords - shoulder_coords,
-                torso_reference["body_right"],
-                torso_reference["body_up"],
-                torso_reference["body_forward"],
+                elbow_world - shoulder_world,
+                torso_reference,
             )
             forearm_body = transform_vector_to_body(
-                wrist_coords - elbow_coords,
-                torso_reference["body_right"],
-                torso_reference["body_up"],
-                torso_reference["body_forward"],
+                wrist_world - elbow_world,
+                torso_reference,
             )
 
-        # ----------------------------------------------------
-        # DIBUJO
-        # ----------------------------------------------------
-        if self.draw_torso and torso_reference_valid:
-            torso_color = (
-                (0, 165, 255)
-                if torso_using_previous
-                else (180, 180, 180)
+        if self.draw_torso and torso_valid:
+            torso_color = (0, 165, 255) if torso_previous else (180, 180, 180)
+            draw_line(
+                frame, left_shoulder, right_shoulder,
+                width, height, torso_color, thickness=2,
             )
             draw_line(
-                frame,
-                left_shoulder_coords,
-                right_shoulder_coords,
-                width,
-                height,
-                torso_color,
-                thickness=2,
+                frame, left_hip, right_hip,
+                width, height, torso_color, thickness=2,
             )
-            draw_line(
-                frame,
-                left_hip_coords,
-                right_hip_coords,
-                width,
-                height,
-                torso_color,
-                thickness=2,
+            image_reference = build_torso_reference(
+                left_shoulder,
+                right_shoulder,
+                left_hip,
+                right_hip,
             )
-            draw_line(
-                frame,
-                torso_reference["shoulder_center"],
-                torso_reference["hip_center"],
-                width,
-                height,
-                torso_color,
-                thickness=2,
-            )
-
-            for point in (
-                left_shoulder_coords,
-                right_shoulder_coords,
-                left_hip_coords,
-                right_hip_coords,
-            ):
-                draw_point(
+            if image_reference is not None:
+                draw_line(
                     frame,
-                    point,
+                    image_reference["shoulder_center"],
+                    image_reference["hip_center"],
                     width,
                     height,
                     torso_color,
-                    radius=5,
+                    thickness=2,
                 )
+                if self.draw_torso_axes:
+                    origin = image_reference["shoulder_center"]
+                    length = self.torso_axis_length
+                    for vector_name, color in (
+                        ("body_right", (255, 0, 0)),
+                        ("body_up", (0, 255, 0)),
+                        ("body_forward", (0, 0, 255)),
+                    ):
+                        draw_line(
+                            frame,
+                            origin,
+                            origin + length * image_reference[vector_name],
+                            width,
+                            height,
+                            color,
+                            thickness=3,
+                        )
 
-            if self.draw_torso_axes:
-                origin = torso_reference["shoulder_center"]
-                axis_length = self.torso_axis_length
-                draw_line(
-                    frame,
-                    origin,
-                    origin + axis_length * torso_reference["body_right"],
-                    width,
-                    height,
-                    (255, 0, 0),
-                    thickness=3,
-                )
-                draw_line(
-                    frame,
-                    origin,
-                    origin + axis_length * torso_reference["body_up"],
-                    width,
-                    height,
-                    (0, 255, 0),
-                    thickness=3,
-                )
-                draw_line(
-                    frame,
-                    origin,
-                    origin + axis_length * torso_reference["body_forward"],
-                    width,
-                    height,
-                    (0, 0, 255),
-                    thickness=3,
-                )
+        if self.draw_arm and arm_valid:
+            arm_color = (0, 165, 255) if arm_previous else (0, 255, 0)
+            draw_line(frame, shoulder, elbow, width, height, arm_color, thickness=4)
+            draw_line(frame, elbow, wrist, width, height, arm_color, thickness=4)
+            draw_point(frame, shoulder, width, height, (255, 0, 0), radius=8)
+            draw_point(frame, elbow, width, height, (0, 165, 255), radius=8)
+            draw_point(frame, wrist, width, height, (0, 0, 255), radius=8)
 
-        if self.draw_arm and arm_tracking_valid:
-            arm_color = (
-                (0, 165, 255)
-                if arm_using_previous
-                else (0, 255, 0)
-            )
-            draw_line(
-                frame,
-                shoulder_coords,
-                elbow_coords,
-                width,
-                height,
-                arm_color,
-                thickness=4,
-            )
-            draw_line(
-                frame,
-                elbow_coords,
-                wrist_coords,
-                width,
-                height,
-                arm_color,
-                thickness=4,
-            )
-            draw_point(
-                frame,
-                shoulder_coords,
-                width,
-                height,
-                (255, 0, 0),
-                radius=8,
-            )
-            draw_point(
-                frame,
-                elbow_coords,
-                width,
-                height,
-                (0, 165, 255),
-                radius=8,
-            )
-            draw_point(
-                frame,
-                wrist_coords,
-                width,
-                height,
-                (0, 0, 255),
-                radius=8,
-            )
-
-        if self.draw_hand and hand_tracking_valid:
-            hand_color = (
-                (0, 165, 255)
-                if hand_using_previous
-                else (255, 0, 255)
-            )
-
-            if self.draw_full_hand and full_hand_coords is not None:
+        if self.draw_hand and hand_valid:
+            hand_color = (0, 165, 255) if hand_previous else (255, 0, 255)
+            if self.draw_full_hand and full_hand is not None:
                 for start_index, end_index in HAND_CONNECTIONS:
                     draw_line(
                         frame,
-                        full_hand_coords[start_index],
-                        full_hand_coords[end_index],
+                        full_hand[start_index],
+                        full_hand[end_index],
                         width,
                         height,
                         hand_color,
                         thickness=2,
                     )
-                for index, point in enumerate(full_hand_coords):
+                for index, point in enumerate(full_hand):
                     draw_point(
                         frame,
                         point,
                         width,
                         height,
-                        (0, 0, 255)
-                        if index == HAND_WRIST
-                        else (0, 255, 255),
+                        (0, 0, 255) if index == HAND_WRIST else (0, 255, 255),
                         radius=4,
                     )
             else:
                 for start_index, end_index in HAND_CONTROL_CONNECTIONS:
                     draw_line(
                         frame,
-                        hand_control_points[start_index],
-                        hand_control_points[end_index],
+                        hand_control[start_index],
+                        hand_control[end_index],
                         width,
                         height,
                         hand_color,
                         thickness=2,
                     )
-                for index, point in hand_control_points.items():
+                for index, point in hand_control.items():
                     draw_point(
                         frame,
                         point,
                         width,
                         height,
-                        (0, 0, 255)
-                        if index == HAND_WRIST
-                        else (0, 255, 255),
+                        (0, 0, 255) if index == HAND_WRIST else (0, 255, 255),
                         radius=5,
                     )
 
-        self.postprocess_time_ms = (
-            time.perf_counter() - postprocess_start
-        ) * 1000.0
+        self.postprocess_time_ms = (time.perf_counter() - post_start) * 1000.0
 
         result = {
-            "arm_detected": arm_tracking_valid,
-            "hand_detected": hand_tracking_valid,
-            "torso_reference_valid": torso_reference_valid,
-            "arm_detected_current": arm_detected_current,
-            "hand_detected_current": hand_detected_current,
-            "torso_detected_current": torso_detected_current,
-            "arm_using_previous": arm_using_previous,
-            "hand_using_previous": hand_using_previous,
-            "torso_using_previous": torso_using_previous,
-            "shoulder": shoulder_coords,
-            "elbow": elbow_coords,
-            "wrist": wrist_coords,
-            "left_shoulder": left_shoulder_coords,
-            "right_shoulder": right_shoulder_coords,
-            "left_hip": left_hip_coords,
-            "right_hip": right_hip_coords,
-            "hand": full_hand_coords,
-            "hand_control": hand_control_points,
+            "arm_detected": arm_valid,
+            "hand_detected": hand_valid,
+            "torso_reference_valid": torso_valid,
+            "arm_detected_current": arm_current,
+            "hand_detected_current": hand_current,
+            "torso_detected_current": torso_current,
+            "arm_using_previous": arm_previous,
+            "hand_using_previous": hand_previous,
+            "torso_using_previous": torso_previous,
+            "shoulder": shoulder,
+            "elbow": elbow,
+            "wrist": wrist,
+            "shoulder_world": shoulder_world,
+            "elbow_world": elbow_world,
+            "wrist_world": wrist_world,
+            "left_shoulder": left_shoulder,
+            "right_shoulder": right_shoulder,
+            "left_hip": left_hip,
+            "right_hip": right_hip,
+            "left_shoulder_world": left_shoulder_world,
+            "right_shoulder_world": right_shoulder_world,
+            "left_hip_world": left_hip_world,
+            "right_hip_world": right_hip_world,
+            "upper_arm_body": upper_arm_body,
+            "forearm_body": forearm_body,
+            "hand": full_hand,
+            "hand_control": hand_control,
             "raw_hand_openness": raw_hand_openness,
             "hand_label": hand_label,
             "distance": hand_distance,
-            "upper_arm_body": upper_arm_body,
-            "forearm_body": forearm_body,
             "arm_lost_frames": self.arm_lost_frames,
             "hand_lost_frames": self.hand_lost_frames,
             "torso_lost_frames": self.torso_lost_frames,
@@ -854,7 +665,7 @@ class ArmHandProcessor:
             "postprocess_time_ms": self.postprocess_time_ms,
         }
 
-        if torso_reference_valid:
+        if torso_valid:
             result.update(torso_reference)
         else:
             result.update({
