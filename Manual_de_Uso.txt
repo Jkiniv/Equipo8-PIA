@@ -1,0 +1,129 @@
+# Uso del sistema de control del robot
+
+## Requisitos
+
+Antes de ejecutar el programa, asegúrate de tener:
+
+- Python 3.11.
+- El entorno virtual del proyecto activo.
+- Una cámara disponible.
+- Los modelos de MediaPipe dentro de HandRecognition/modelos.
+- El archivo hachi.urdf dentro de HandRecognition.
+- Las dependencias instaladas desde requirements.txt.
+
+## Ejecución
+
+Desde la raíz del repositorio:
+
+python HandRecognition/realtimesim.py
+
+El programa abrirá:
+
+1. Una ventana de cámara mediante OpenCV.
+2. La simulación del robot mediante Swift.
+
+Para que las teclas funcionen, primero haz clic sobre la ventana de OpenCV.
+
+## Calibración del brazo
+
+La calibración utiliza tres posturas.
+
+### C: postura neutral
+
+Coloca el brazo objetivo:
+
+- hacia abajo;
+- con el codo recto;
+- con el torso visible;
+- sin levantar el hombro.
+
+Presiona C y conserva la postura hasta completar 30 muestras.
+
+### H: brazo horizontal
+
+Coloca el brazo objetivo:
+
+- extendido lateralmente;
+- aproximadamente horizontal;
+- con el codo recto;
+- con el hombro, codo y muñeca visibles.
+
+Presiona H y conserva la postura hasta completar 30 muestras.
+
+### E: codo flexionado
+
+Mantén:
+
+- el brazo superior aproximadamente horizontal;
+- el codo visible;
+- la muñeca hacia arriba;
+- una flexión cercana a 90 grados.
+
+Presiona E y conserva la postura hasta completar 30 muestras.
+
+Cuando los tres registros sean válidos, el control del brazo se activará.
+
+### Reiniciar el brazo
+
+Presiona X para eliminar las referencias C, H y E.
+
+Después será necesario repetir las tres posturas.
+
+## Calibración de la garra
+
+### F: mano cerrada
+
+Cierra la mano completamente y presiona F.
+
+Mantén la mano cerrada hasta completar las 30 muestras.
+
+### O: mano abierta
+
+Abre completamente la mano y presiona O.
+
+Mantén la mano abierta hasta completar las 30 muestras.
+
+Después de completar F y O, los dos dedos de la garra seguirán proporcionalmente la apertura de la mano.
+
+### Reiniciar la garra
+
+Presiona R para eliminar la calibración de la garra.
+
+## Controles
+
+C:
+Calibrar postura neutral del brazo.
+
+H:
+Calibrar brazo horizontal y recto.
+
+E:
+Calibrar codo flexionado.
+
+X:
+Reiniciar calibración del brazo.
+
+F:
+Calibrar mano cerrada.
+
+O:
+Calibrar mano abierta.
+
+R:
+Reiniciar calibración de la garra.
+
+ESC:
+Cerrar el programa.
+
+## Recomendaciones
+
+- Mantén visibles ambos hombros y ambas caderas.
+- Evita que el brazo salga del cuadro.
+- Realiza movimientos lentos durante las pruebas iniciales.
+- Mantén una distancia similar de la cámara durante toda la calibración.
+- Evita superponer la muñeca con el torso.
+- Procura una iluminación uniforme.
+- No coloques objetos cerca del robot durante la calibración.
+- Si el robot se mueve hacia el lado incorrecto, revisa el signo y offset del plano del hombro.
+- Si aparece RANGO INVALIDO, repite las posturas con mayor separación entre C, H y E.
+- Si se pierde momentáneamente la detección, el robot conservará la última posición válida.
