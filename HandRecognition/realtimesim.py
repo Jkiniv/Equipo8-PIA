@@ -1,4 +1,4 @@
-"""Simulacion en tiempo real de un robot URDF controlado con MediaPipe.
+"""Simulacion en tiempo real de un robot URDF de 7 joints controlado con MediaPipe.
 
 Controles en la ventana de OpenCV:
 - F: calibrar mano cerrada
@@ -21,16 +21,10 @@ from detector import initialize_detectors
 from processor import ArmHandProcessor
 from utils import print_robot_coordinates
 
-
-# ============================================================
-# RUTAS Y CONFIGURACION
-# ============================================================
-
 BASE_DIRECTORY = Path(__file__).parent
 URDF_PATH = BASE_DIRECTORY / "hachi.urdf"
 POSE_MODEL = BASE_DIRECTORY / "modelos" / "pose_landmarker_full.task"
 HAND_MODEL = BASE_DIRECTORY / "modelos" / "hand_landmarker.task"
-
 CAMERA_INDEX = 0
 TARGET_ARM = "right"
 
@@ -68,104 +62,71 @@ CONFIG = {
 }
 
 
-# ============================================================
-# FUNCIONES AUXILIARES
-# ============================================================
-
 def open_camera(camera_index):
-    """Abre la camara con un backend adecuado para Windows o Linux."""
     system_name = platform.system().lower()
-
     if system_name == "windows":
-        print("Sistema operativo detectado: Windows")
         capture = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
     elif system_name == "linux":
-        print("Sistema operativo detectado: Linux")
         capture = cv2.VideoCapture(camera_index, cv2.CAP_V4L2)
     else:
-        print(f"Sistema operativo detectado: {platform.system()}")
         capture = cv2.VideoCapture(camera_index)
 
     if not capture.isOpened():
-        print("El backend especifico fallo. Intentando modo automatico...")
         capture.release()
         capture = cv2.VideoCapture(camera_index)
 
     if not capture.isOpened():
-        raise RuntimeError(
-            "No se pudo abrir la camara. Verifica CAMERA_INDEX y que "
-            "ninguna otra aplicacion este utilizando la camara."
-        )
-
+        raise RuntimeError("No se pudo abrir la camara.")
     return capture
 
 
-def normalize_gripper_openness(raw_openness, closed_raw, open_raw):
-    """Convierte la apertura cruda a un valor limitado entre 0 y 1."""
-    calibration_range = open_raw - closed_raw
+def normalize_gripper_openness(raw_value, closed_value, open_value):
+    calibration_range = open_value - closed_value
     if abs(calibration_range) <= 1e-6:
         return None
-
-    value = (raw_openness - closed_raw) / calibration_range
-    return float(np.clip(value, 0.0, 1.0))
+    return float(np.clip((raw_value - closed_value) / calibration_range, 0.0, 1.0))
 
 
 def smooth_scalar(previous_value, current_value, alpha):
-    """Suavizado exponencial para un valor escalar."""
     if previous_value is None:
         return float(current_value)
     return float(alpha * current_value + (1.0 - alpha) * previous_value)
 
 
-def map_gripper_to_joint(openness, robot_model, reversed_direction=False):
-    """Mapea una apertura 0..1 al rango del joint 6 del URDF."""
-    if robot_model.n < 6:
-        return None
-
-    joint_minimum = float(robot_model.qlim[0, 5])
-    joint_maximum = float(robot_model.qlim[1, 5])
-
-    output_range = (
-        [joint_maximum, joint_minimum]
-        if reversed_direction
-        else [joint_minimum, joint_maximum]
-    )
-
-    return float(np.interp(openness, [0.0, 1.0], output_range))
-
-
-def validate_calibration(closed_raw, open_raw, minimum_range):
-    """Valida que abierta y cerrada esten en el orden y rango esperados."""
-    if closed_raw is None or open_raw is None:
+def validate_calibration(closed_value, open_value, minimum_range):
+    if closed_value is None or open_value is None:
         return False, "Calibracion incompleta"
-
-    calibration_range = open_raw - closed_raw
-
-    if calibration_range < 0:
+    difference = open_value - closed_value
+    if difference < 0:
         return False, "Calibracion invertida | Repite F y O"
-
-    if calibration_range < minimum_range:
+    if difference < minimum_range:
         return False, "Rango insuficiente | Repite F y O"
-
     return True, "Calibracion valida"
 
 
+def calculate_finger_targets(openness, robot_model, reversed_direction=False):
+    """Mapea 0..1 a q5 y q6 de la garra paralela."""
+    if robot_model.n < 7:
+        return None, None
+
+    effective_openness = 1.0 - openness if reversed_direction else openness
+    left_target = float(np.interp(
+        effective_openness,
+        [0.0, 1.0],
+        [robot_model.qlim[0, 5], robot_model.qlim[1, 5]],
+    ))
+    right_target = float(np.interp(
+        effective_openness,
+        [0.0, 1.0],
+        [robot_model.qlim[1, 6], robot_model.qlim[0, 6]],
+    ))
+    return left_target, right_target
+
+
 def put_text(image, text, y, color=(255, 255, 255), scale=0.55, thickness=2):
-    """Dibuja una linea de texto en la columna izquierda."""
-    cv2.putText(
-        image,
-        text,
-        (20, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        color,
-        thickness,
-    )
+    cv2.putText(image, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, color, thickness)
 
-
-# ============================================================
-# VALIDAR ARCHIVOS Y CARGAR ROBOT
-# ============================================================
 
 for required_path, description in (
     (URDF_PATH, "archivo URDF"),
@@ -175,41 +136,26 @@ for required_path, description in (
     if not required_path.is_file():
         raise FileNotFoundError(f"No se encontro el {description}:\n{required_path}")
 
-print("=" * 70)
-print(f"Cargando robot desde: {URDF_PATH}")
-print("=" * 70)
-
 robot = rtb.ERobot.URDF(str(URDF_PATH))
 print(robot)
 
-if robot.n < 6:
+if robot.n < 7:
     raise RuntimeError(
-        "El proyecto requiere un robot de al menos 6 articulaciones "
-        "para hombro, codo, muneca y garra."
+        "El robot necesita al menos 7 articulaciones: "
+        "cinco para el brazo y dos para la garra."
     )
-
 if robot.qlim is None or robot.qlim.shape != (2, robot.n):
     raise RuntimeError("El URDF no contiene limites articulares validos.")
-
-if not np.all(np.isfinite(robot.qlim[:, 5])):
-    raise RuntimeError("El joint 6 no tiene limites finitos para la garra.")
+if not np.all(np.isfinite(robot.qlim[:, 5:7])):
+    raise RuntimeError("Los joints 6 y 7 no tienen limites finitos para la garra.")
 
 print("Limites articulares detectados:")
 for joint_index in range(robot.n):
+    unit = "m" if joint_index in (5, 6) else "rad"
     print(
-        f"Joint {joint_index + 1}: "
-        f"{robot.qlim[0, joint_index]:.4f} a "
-        f"{robot.qlim[1, joint_index]:.4f} rad"
+        f"Joint {joint_index + 1}: {robot.qlim[0, joint_index]:.4f} "
+        f"a {robot.qlim[1, joint_index]:.4f} {unit}"
     )
-
-
-# ============================================================
-# INICIALIZAR SWIFT, CAMARA Y MEDIAPIPE
-# ============================================================
-
-print("=" * 70)
-print("Iniciando simulador Swift...")
-print("=" * 70)
 
 env = swift.Swift()
 env.launch(realtime=True)
@@ -221,26 +167,7 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG["CAMERA_HEIGHT"])
 cap.set(cv2.CAP_PROP_FPS, CONFIG["CAMERA_FPS"])
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-print("=" * 70)
-print(
-    "Camara: "
-    f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))} x "
-    f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} | "
-    f"{cap.get(cv2.CAP_PROP_FPS):.2f} FPS"
-)
-print(
-    "Resolucion de inferencia: "
-    f"{CONFIG['PROCESSING_WIDTH']} x {CONFIG['PROCESSING_HEIGHT']}"
-)
-print(f"Brazo objetivo: {TARGET_ARM.upper()}")
-print("=" * 70)
-
-pose_detector, hand_detector = initialize_detectors(
-    POSE_MODEL,
-    HAND_MODEL,
-    CONFIG,
-)
-
+pose_detector, hand_detector = initialize_detectors(POSE_MODEL, HAND_MODEL, CONFIG)
 processor = ArmHandProcessor(
     pose_detector=pose_detector,
     hand_detector=hand_detector,
@@ -248,11 +175,6 @@ processor = ArmHandProcessor(
     config=CONFIG,
     use_smoothing=True,
 )
-
-
-# ============================================================
-# ESTADOS DEL PROGRAMA
-# ============================================================
 
 program_start_time = time.perf_counter()
 last_timestamp_ms = -1
@@ -266,7 +188,6 @@ last_valid_q = np.clip(last_valid_q, robot.qlim[0, :], robot.qlim[1, :])
 robot.q = last_valid_q.copy()
 lost_frame_count = 0
 
-# Calibracion de garra.
 gripper_calibration_mode = None
 gripper_calibration_values = []
 gripper_closed_raw = None
@@ -275,29 +196,22 @@ gripper_calibrated = False
 gripper_calibration_message = "Sin calibrar | F: cerrada | O: abierta"
 gripper_openness = None
 gripper_openness_smoothed = None
-gripper_joint_target = None
+left_finger_target = None
+right_finger_target = None
 
-print("Presiona F para cerrada, O para abierta, R para reiniciar y ESC para salir.")
-
-
-# ============================================================
-# BUCLE PRINCIPAL
-# ============================================================
+print("F: cerrada | O: abierta | R: reiniciar | ESC: salir")
 
 try:
     while True:
         frame_start_time = time.perf_counter()
-
         success, frame = cap.read()
         if not success or frame is None:
             print("ERROR: No se pudo obtener una imagen de la camara.")
             break
 
-        # FPS y timestamp monotono.
         fps_counter += 1
         current_time = time.perf_counter()
         fps_elapsed = current_time - fps_start_time
-
         if fps_elapsed >= 1.0:
             fps_display = fps_counter / fps_elapsed
             fps_counter = 0
@@ -308,7 +222,6 @@ try:
             timestamp_ms = last_timestamp_ms + 1
         last_timestamp_ms = timestamp_ms
 
-        # Inferencia en resolucion reducida.
         processing_frame = cv2.resize(
             frame,
             (CONFIG["PROCESSING_WIDTH"], CONFIG["PROCESSING_HEIGHT"]),
@@ -327,13 +240,9 @@ try:
             timestamp_ms=timestamp_ms,
         )
         vision_time_ms = (time.perf_counter() - vision_start_time) * 1000.0
-
-        # ----------------------------------------------------
-        # CALIBRACION DE GARRA
-        # ----------------------------------------------------
-
         raw_hand_openness = data.get("raw_hand_openness")
 
+        # Recolectar muestras para calibracion.
         if (
             gripper_calibration_mode is not None
             and raw_hand_openness is not None
@@ -342,20 +251,18 @@ try:
             gripper_calibration_values.append(float(raw_hand_openness))
             collected = len(gripper_calibration_values)
             required = CONFIG["GRIPPER_CALIBRATION_SAMPLES"]
-            pose_name = "CERRADA" if gripper_calibration_mode == "closed" else "ABIERTA"
-            gripper_calibration_message = f"Calibrando {pose_name}: {collected}/{required}"
+            name = "CERRADA" if gripper_calibration_mode == "closed" else "ABIERTA"
+            gripper_calibration_message = f"Calibrando {name}: {collected}/{required}"
 
             if collected >= required:
-                calibration_value = float(np.median(gripper_calibration_values))
-
+                calibrated_value = float(np.median(gripper_calibration_values))
                 if gripper_calibration_mode == "closed":
-                    gripper_closed_raw = calibration_value
+                    gripper_closed_raw = calibrated_value
                 else:
-                    gripper_open_raw = calibration_value
+                    gripper_open_raw = calibrated_value
 
                 gripper_calibration_mode = None
                 gripper_calibration_values = []
-
                 gripper_calibrated, validation_message = validate_calibration(
                     gripper_closed_raw,
                     gripper_open_raw,
@@ -365,27 +272,25 @@ try:
                 if gripper_calibrated:
                     gripper_openness_smoothed = None
                     gripper_calibration_message = (
-                        "Calibracion COMPLETA | "
-                        f"Cerrada: {gripper_closed_raw:.3f} | "
+                        f"Calibracion COMPLETA | Cerrada: {gripper_closed_raw:.3f} | "
                         f"Abierta: {gripper_open_raw:.3f}"
                     )
                 elif gripper_closed_raw is None or gripper_open_raw is None:
                     registered_name = "Cerrada" if gripper_closed_raw is not None else "Abierta"
                     registered_value = (
-                        gripper_closed_raw
-                        if gripper_closed_raw is not None
+                        gripper_closed_raw if gripper_closed_raw is not None
                         else gripper_open_raw
                     )
                     gripper_calibration_message = (
                         f"{registered_name} registrada: {registered_value:.3f}"
                     )
                 else:
-                    gripper_openness = None
-                    gripper_openness_smoothed = None
-                    gripper_joint_target = None
                     gripper_calibration_message = validation_message
+                    gripper_openness_smoothed = None
+                    left_finger_target = None
+                    right_finger_target = None
 
-        # Convertir apertura calibrada en objetivo del joint 6.
+        # Calcular porcentaje y posiciones de ambos dedos.
         if (
             gripper_calibrated
             and raw_hand_openness is not None
@@ -397,26 +302,23 @@ try:
                 gripper_closed_raw,
                 gripper_open_raw,
             )
-
             if gripper_openness is not None:
                 gripper_openness_smoothed = smooth_scalar(
                     gripper_openness_smoothed,
                     gripper_openness,
                     CONFIG["GRIPPER_SMOOTHING_ALPHA"],
                 )
-                gripper_joint_target = map_gripper_to_joint(
+                left_finger_target, right_finger_target = calculate_finger_targets(
                     gripper_openness_smoothed,
                     robot,
                     CONFIG["GRIPPER_REVERSED"],
                 )
         else:
             gripper_openness = None
-            gripper_joint_target = None
+            left_finger_target = None
+            right_finger_target = None
 
-        # ----------------------------------------------------
-        # CALCULO ARTICULAR ACTUAL
-        # ----------------------------------------------------
-
+        # Calculo actual del brazo.
         tracking_valid = False
         q_target = last_valid_q.copy()
 
@@ -429,41 +331,33 @@ try:
             shoulder = np.asarray(data["shoulder"], dtype=np.float64)
             elbow = np.asarray(data["elbow"], dtype=np.float64)
             wrist = np.asarray(data["wrist"], dtype=np.float64)
-
             upper_arm_vector = elbow - shoulder
             forearm_vector = wrist - elbow
-            upper_arm_norm = np.linalg.norm(upper_arm_vector)
+            upper_norm = np.linalg.norm(upper_arm_vector)
             forearm_norm = np.linalg.norm(forearm_vector)
 
-            if upper_arm_norm > 1e-6 and forearm_norm > 1e-6:
-                q_target[0] = np.arctan2(
-                    upper_arm_vector[0],
-                    -upper_arm_vector[2],
-                )
-
+            if upper_norm > 1e-6 and forearm_norm > 1e-6:
+                q_target[0] = np.arctan2(upper_arm_vector[0], -upper_arm_vector[2])
                 horizontal_distance = np.linalg.norm(
                     [upper_arm_vector[0], upper_arm_vector[2]]
                 )
-                q_target[1] = np.arctan2(
-                    upper_arm_vector[1],
-                    horizontal_distance,
+                q_target[1] = np.arctan2(upper_arm_vector[1], horizontal_distance)
+                cosine_angle = np.dot(upper_arm_vector, forearm_vector) / (
+                    upper_norm * forearm_norm
                 )
-
-                cosine_angle = np.dot(
-                    upper_arm_vector,
-                    forearm_vector,
-                ) / (upper_arm_norm * forearm_norm)
                 q_target[2] = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
 
-                # Control proporcional de la garra despues de calibrar.
                 if (
                     gripper_calibrated
-                    and gripper_joint_target is not None
+                    and left_finger_target is not None
+                    and right_finger_target is not None
                     and data["hand_detected"]
                 ):
-                    q_target[5] = gripper_joint_target
+                    q_target[5] = left_finger_target
+                    q_target[6] = right_finger_target
                 else:
                     q_target[5] = last_valid_q[5]
+                    q_target[6] = last_valid_q[6]
 
                 q_target = np.clip(q_target, robot.qlim[0, :], robot.qlim[1, :])
                 last_valid_q = q_target.copy()
@@ -474,13 +368,11 @@ try:
             lost_frame_count += 1
             q_target = last_valid_q.copy()
 
-        # Swift.
         swift_start_time = time.perf_counter()
         robot.q = q_target
         env.step(CONFIG["SWIFT_STEP_SECONDS"])
         swift_time_ms = (time.perf_counter() - swift_start_time) * 1000.0
 
-        # Impresion opcional.
         if (
             CONFIG["DEBUG_PRINT_COORDINATES"]
             and data["arm_detected"]
@@ -499,11 +391,6 @@ try:
             last_print_time = current_time
 
         total_time_ms = (time.perf_counter() - frame_start_time) * 1000.0
-
-        # ----------------------------------------------------
-        # INTERFAZ
-        # ----------------------------------------------------
-
         display_frame = cv2.flip(frame, 1)
         display_height, display_width, _ = display_frame.shape
 
@@ -517,7 +404,6 @@ try:
             (255, 255, 255),
             2,
         )
-
         put_text(
             display_frame,
             "BRAZO DETECTADO" if data["arm_detected"] else "BRAZO NO DETECTADO",
@@ -548,20 +434,15 @@ try:
 
         put_text(
             display_frame,
-            "TRACKING ACTIVO"
-            if tracking_valid
+            "TRACKING ACTIVO" if tracking_valid
             else f"MANTENIENDO POSICION | Frames perdidos: {lost_frame_count}",
             355,
             (0, 255, 0) if tracking_valid else (0, 165, 255),
         )
 
         if CONFIG["SHOW_RAW_HAND_OPENNESS"] and raw_hand_openness is not None:
-            put_text(
-                display_frame,
-                f"Apertura cruda: {raw_hand_openness:.3f}",
-                385,
-                (255, 255, 0),
-            )
+            put_text(display_frame, f"Apertura cruda: {raw_hand_openness:.3f}",
+                     385, (255, 255, 0))
 
         put_text(
             display_frame,
@@ -579,45 +460,34 @@ try:
                 (255, 255, 0),
             )
 
-        if gripper_joint_target is not None:
+        if left_finger_target is not None and right_finger_target is not None:
+            side_mm = abs(left_finger_target) * 1000.0
+            extra_mm = (abs(left_finger_target) + abs(right_finger_target)) * 1000.0
             put_text(
                 display_frame,
-                f"Joint 6 objetivo: {gripper_joint_target:.3f} rad",
+                f"Dedos: {side_mm:.1f} mm por lado | Apertura extra: {extra_mm:.1f} mm",
                 475,
                 (255, 255, 0),
             )
 
         gripper_control_active = (
             gripper_calibrated
-            and gripper_joint_target is not None
+            and left_finger_target is not None
+            and right_finger_target is not None
             and data["hand_detected"]
         )
-
         if gripper_control_active:
-            gripper_control_text = "Control de garra: ACTIVO"
-            gripper_control_color = (0, 255, 0)
+            control_text, control_color = "Control de garra: ACTIVO", (0, 255, 0)
         elif not gripper_calibrated:
-            gripper_control_text = "Control de garra: ESPERANDO CALIBRACION"
-            gripper_control_color = (0, 165, 255)
+            control_text, control_color = (
+                "Control de garra: ESPERANDO CALIBRACION", (0, 165, 255)
+            )
         else:
-            gripper_control_text = "Control de garra: MANO NO DETECTADA"
-            gripper_control_color = (0, 0, 255)
+            control_text, control_color = "Control de garra: MANO NO DETECTADA", (0, 0, 255)
 
-        put_text(
-            display_frame,
-            gripper_control_text,
-            505,
-            gripper_control_color,
-            0.50,
-        )
-        put_text(
-            display_frame,
-            "F: cerrada | O: abierta | R: reiniciar",
-            535,
-            (220, 220, 220),
-            0.50,
-            1,
-        )
+        put_text(display_frame, control_text, 505, control_color, 0.50)
+        put_text(display_frame, "F: cerrada | O: abierta | R: reiniciar",
+                 535, (220, 220, 220), 0.50, 1)
         put_text(
             display_frame,
             f"Perdidos | Brazo: {data['arm_lost_frames']} Mano: {data['hand_lost_frames']}",
@@ -626,36 +496,22 @@ try:
             0.50,
             1,
         )
-        put_text(
-            display_frame,
-            "ESC: salir",
-            display_height - 20,
-            (200, 200, 200),
-            0.55,
-            1,
-        )
+        put_text(display_frame, "ESC: salir", display_height - 20,
+                 (200, 200, 200), 0.55, 1)
 
         cv2.imshow("MediaPipe - Control de robot", display_frame)
-
-        # ----------------------------------------------------
-        # CONTROLES
-        # ----------------------------------------------------
-
         key = cv2.waitKey(1) & 0xFF
 
         if key == 27:
             print("\nPrograma detenido por el usuario.")
             break
-
-        if key in (ord("f"), ord("F")):
+        elif key in (ord("f"), ord("F")):
             if raw_hand_openness is None:
                 gripper_calibration_message = "No se detecta la mano para calibrar"
             else:
                 gripper_calibration_mode = "closed"
                 gripper_calibration_values = []
                 gripper_calibration_message = "Manten la mano CERRADA..."
-                print("\nCalibracion de mano cerrada iniciada.")
-
         elif key in (ord("o"), ord("O")):
             if raw_hand_openness is None:
                 gripper_calibration_message = "No se detecta la mano para calibrar"
@@ -663,8 +519,6 @@ try:
                 gripper_calibration_mode = "open"
                 gripper_calibration_values = []
                 gripper_calibration_message = "Manten la mano ABIERTA..."
-                print("\nCalibracion de mano abierta iniciada.")
-
         elif key in (ord("r"), ord("R")):
             gripper_calibration_mode = None
             gripper_calibration_values = []
@@ -673,25 +527,22 @@ try:
             gripper_calibrated = False
             gripper_openness = None
             gripper_openness_smoothed = None
-            gripper_joint_target = None
+            left_finger_target = None
+            right_finger_target = None
             gripper_calibration_message = (
                 "Calibracion reiniciada | F: cerrada | O: abierta"
             )
-            print("\nCalibracion de la garra reiniciada.")
 
 except KeyboardInterrupt:
     print("\nPrograma detenido mediante Ctrl + C.")
-
 finally:
     print("Liberando recursos...")
     cap.release()
     pose_detector.close()
     hand_detector.close()
     cv2.destroyAllWindows()
-
     try:
         env.close()
     except Exception as close_error:
         print(f"Swift no pudo cerrarse automaticamente: {close_error}")
-
     print("Recursos liberados correctamente.")

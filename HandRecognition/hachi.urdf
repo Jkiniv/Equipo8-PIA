@@ -204,36 +204,179 @@
     <limit lower="-1.5708" upper="1.5708" effort="20" velocity="5.0"/>
   </joint>
 
-  <!-- Joint 6: Gripper (Open/Close Mechanism) -->
-  <link name="gripper_link">
+  <!-- ===================================================== -->
+  <!-- GARRA PARALELA SIMPLE DE DOS DEDOS                    -->
+  <!-- ===================================================== -->
+
+  <!-- Base fija de la garra -->
+  <link name="gripper_base_link">
+
     <visual>
-      <origin xyz="0 0 -0.04" rpy="0 0 0"/>
+      <origin xyz="0 0 -0.025" rpy="0 0 0"/>
       <geometry>
-        <box size="0.02 0.05 0.08"/>
+        <box size="0.08 0.08 0.05"/>
       </geometry>
-      <material name="red">
-        <color rgba="0.8 0.0 0.0 1.0"/>
+
+      <material name="gripper_base_red">
+        <color rgba="0.80 0.05 0.05 1.0"/>
       </material>
     </visual>
+
     <collision>
-      <origin xyz="0 0 -0.04" rpy="0 0 0"/>
+      <origin xyz="0 0 -0.025" rpy="0 0 0"/>
       <geometry>
-        <box size="0.02 0.05 0.08"/>
+        <box size="0.08 0.08 0.05"/>
       </geometry>
     </collision>
+
     <inertial>
-      <mass value="0.2"/>
-      <origin xyz="0 0 -0.04"/>
-      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+      <mass value="0.20"/>
+      <origin xyz="0 0 -0.025" rpy="0 0 0"/>
+      <inertia
+        ixx="0.001"
+        ixy="0"
+        ixz="0"
+        iyy="0.001"
+        iyz="0"
+        izz="0.001"/>
     </inertial>
+
   </link>
 
-  <joint name="joint_6" type="revolute">
+
+  <!-- La base de la garra queda unida de forma fija
+       a la última articulación de la muñeca -->
+  <joint name="gripper_base_joint" type="fixed">
+
     <parent link="wrist_2_link"/>
-    <child link="gripper_link"/>
-    <origin xyz="0 0 -0.1" rpy="0 0 0"/>
-    <axis xyz="1 0 0"/>
-    <limit lower="0.0" upper="0.8" effort="10" velocity="5.0"/>
+    <child link="gripper_base_link"/>
+
+    <origin xyz="0 0 -0.10" rpy="0 0 0"/>
+
+  </joint>
+
+
+  <!-- ===================================================== -->
+  <!-- DEDO IZQUIERDO                                        -->
+  <!-- ===================================================== -->
+
+  <link name="left_finger_link">
+
+    <visual>
+      <!-- El dedo se extiende hacia abajo desde su joint -->
+      <origin xyz="0 0 -0.06" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.025 0.025 0.12"/>
+      </geometry>
+
+      <material name="left_finger_blue">
+        <color rgba="0.10 0.30 0.90 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 -0.06" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.025 0.025 0.12"/>
+      </geometry>
+    </collision>
+
+    <inertial>
+      <mass value="0.08"/>
+      <origin xyz="0 0 -0.06" rpy="0 0 0"/>
+      <inertia
+        ixx="0.0002"
+        ixy="0"
+        ixz="0"
+        iyy="0.0002"
+        iyz="0"
+        izz="0.0001"/>
+    </inertial>
+
+  </link>
+
+
+  <!-- Joint 6: dedo izquierdo.
+       Se desplaza hacia Y positivo al abrirse. -->
+  <joint name="joint_6" type="prismatic">
+
+    <parent link="gripper_base_link"/>
+    <child link="left_finger_link"/>
+
+    <!-- Posición inicial del dedo junto al centro -->
+    <origin xyz="0 0.015 -0.05" rpy="0 0 0"/>
+
+    <!-- Movimiento lateral -->
+    <axis xyz="0 1 0"/>
+
+    <!-- 0.00 m = cerrada
+         0.04 m = abierta -->
+    <limit
+      lower="0.0"
+      upper="0.04"
+      effort="10"
+      velocity="0.20"/>
+
+  </joint>
+
+
+  <!-- ===================================================== -->
+  <!-- DEDO DERECHO                                          -->
+  <!-- ===================================================== -->
+
+  <link name="right_finger_link">
+
+    <visual>
+      <origin xyz="0 0 -0.06" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.025 0.025 0.12"/>
+      </geometry>
+
+      <material name="right_finger_blue">
+        <color rgba="0.10 0.30 0.90 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 -0.06" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.025 0.025 0.12"/>
+      </geometry>
+    </collision>
+
+    <inertial>
+      <mass value="0.08"/>
+      <origin xyz="0 0 -0.06" rpy="0 0 0"/>
+      <inertia
+        ixx="0.0002"
+        ixy="0"
+        ixz="0"
+        iyy="0.0002"
+        iyz="0"
+        izz="0.0001"/>
+    </inertial>
+
+  </link>
+
+
+  <!-- Joint 7: dedo derecho.
+       Se desplaza hacia Y negativo al abrirse. -->
+  <joint name="joint_7" type="prismatic">
+
+    <parent link="gripper_base_link"/>
+    <child link="right_finger_link"/>
+
+    <origin xyz="0 -0.015 -0.05" rpy="0 0 0"/>
+
+    <axis xyz="0 1 0"/>
+
+    <!-- El rango es negativo porque abre hacia el lado opuesto -->
+    <limit
+      lower="-0.04"
+      upper="0.0"
+      effort="10"
+      velocity="0.20"/>
+
   </joint>
 
 </robot>
