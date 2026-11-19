@@ -41,7 +41,7 @@ URDF_PATH = BASE_DIRECTORY / "hachi.urdf"
 POSE_MODEL = BASE_DIRECTORY / "modelos" / "pose_landmarker_full.task"
 HAND_MODEL = BASE_DIRECTORY / "modelos" / "hand_landmarker.task"
 
-CAMERA_INDEX = 1
+CAMERA_INDEX = 0
 TARGET_ARM = "right"
 
 CONFIG = {
@@ -148,7 +148,6 @@ REQUIRED_CONFIG_KEYS = {
     "SWIFT_STEP_SECONDS",
 }
 
-
 def validate_config(config, required_keys, config_name):
     missing_keys = sorted(
         key
@@ -162,15 +161,12 @@ def validate_config(config, required_keys, config_name):
             + ", ".join(missing_keys)
         )
 
-
 validate_config(CONFIG, REQUIRED_CONFIG_KEYS, "realtimesim.py")
-
 
 # ============================================================
 # FUNCIONES AUXILIARES
 # ============================================================
 def calculate_raw_wrist_angles(data):
-    """Calculate raw wrist pitch and roll from forearm and hand landmarks."""
     shoulder_world = data.get("shoulder_world")
     elbow_world = data.get("elbow_world")
     wrist_world = data.get("wrist_world")
@@ -188,7 +184,7 @@ def calculate_raw_wrist_angles(data):
 
     wrist_pitch = 0.0
     wrist_roll = 0.0
-
+    wrist_yaw = 0.0
     if hand_landmarks is not None and len(hand_landmarks) >= 21:
         wrist_pt = np.asarray(hand_landmarks[0], dtype=np.float64)
         middle_mcp = np.asarray(hand_landmarks[9], dtype=np.float64)
@@ -213,6 +209,7 @@ def calculate_raw_wrist_angles(data):
     return {
         "wrist_pitch": float(wrist_pitch),
         "wrist_roll": float(wrist_roll),
+        "wrist_yaw": float(wrist_yaw),
     }
 
 def open_camera(camera_index):
@@ -493,7 +490,6 @@ if not np.all(np.isfinite(robot.qlim[:, 5:7])):
 
 print("=" * 70)
 print("Limites articulares")
-
 for joint_index in range(robot.n):
     unit = "m" if joint_index in (5, 6) else "rad"
     print(
@@ -501,7 +497,6 @@ for joint_index in range(robot.n):
         f"{robot.qlim[0, joint_index]:+.4f} a "
         f"{robot.qlim[1, joint_index]:+.4f} {unit}"
     )
-
 print("=" * 70)
 
 
@@ -556,8 +551,9 @@ arm_calibration_message = "Brazo sin calibrar | C-H-E"
 shoulder_plane_smoothed = None
 shoulder_elevation_smoothed = None
 elbow_smoothed = None
-wrist_pitch_smoothed = None  # <-- Add this
-wrist_roll_smoothed = None   # <-- Add this
+wrist_pitch_smoothed = None  
+wrist_roll_smoothed = None 
+wrist_yaw_smoothed = None  
 last_shoulder_plane = 0.0
 
 
@@ -747,14 +743,19 @@ try:
             if raw_wrist is not None:
                 wrist_pitch_smoothed = smooth_scalar(
                     wrist_pitch_smoothed,
-                    raw_wrist["wrist_pitch"],
+                    raw_wrist["wrist_roll"],
                     CONFIG["ARM_CONTROL_SMOOTHING_ALPHA"],
                 )
                 wrist_roll_smoothed = smooth_scalar(
                     wrist_roll_smoothed,
-                    raw_wrist["wrist_roll"],
+                    raw_wrist["wrist_pitch"],
                     CONFIG["ARM_CONTROL_SMOOTHING_ALPHA"],
                 )
+                wrist_yaw_smoothed = smooth_scalar(
+                    wrist_yaw_smoothed,
+                    raw_wrist["wrist_yaw"],
+                    CONFIG["ARM_CONTROL_SMOOTHING_ALPHA"],
+                    )
                 wrist_targets = {
                     "wrist_pitch": np.clip(wrist_pitch_smoothed, robot.qlim[0, 3], robot.qlim[1, 3]),
                     "wrist_roll": np.clip(wrist_roll_smoothed, robot.qlim[0, 4], robot.qlim[1, 4]),
@@ -841,17 +842,10 @@ try:
                 )
 
                 # Normalizar el ángulo al intervalo -pi a +pi.
-                q_target[0] = (
-                    q_target[0] + np.pi
-                ) % (
-                    2.0 * np.pi
-                ) - np.pi
+                q_target[0] = (q_target[0] + np.pi) % (2.0 * np.pi) - np.pi
                 
-                q_target[1] = (
-                    CONFIG["SHOULDER_ELEVATION_SIGN"]
-                    * shoulder_elevation_smoothed
-                )
-                q_target[2] = CONFIG["ELBOW_SIGN"] * elbow_smoothed
+                q_target[1] = (CONFIG["SHOULDER_ELEVATION_SIGN"] * shoulder_elevation_smoothed)
+                q_target[2] = (CONFIG["ELBOW_SIGN"] * elbow_smoothed)
             if wrist_targets is not None:
                 q_target[3] = wrist_targets["wrist_pitch"]
                 q_target[4] = wrist_targets["wrist_roll"]
@@ -930,18 +924,34 @@ try:
 
         swift_start = time.perf_counter()
         robot.q = q_target
-        
-        # --- SERIAL STREAMING TO ARDUINO / PCA9685 ---
-        # Convert radians to degrees and shift to servo range [0, 180]
-        # Taking the first 6 joints for your 6 PCA9685 servo channels
-        angles_deg = np.degrees(q_target[:7]) + 90.0 
-      
 
-        # Format as comma-separated string ending with newline
-        payload = ",".join([f"{a:.1f}" for a in angles_deg]) + "\n"
-        arduino.write(payload.encode('utf-8'))
+        # --- SERIAL STREAMING TO ARDUINO / PCA9685 ---
+        # Indices 0..4: joints 0..4 converted from radians to degrees (+90° offset)
+        serial_angles_deg = list(np.degrees(q_target[:5]) + 90.0)
+        serial_angles_deg[4] = float(np.clip(serial_angles_deg[4] + 90.0, 0.0, 180.0))
+        # Index 5: Wrist yaw in degrees (adjust variable/offset if your yaw uses a different name or range)
+        wrist_yaw_deg = (
+            float(np.degrees(wrist_yaw_smoothed) + 90.0)
+            if "wrist_yaw_smoothed" in locals() and wrist_yaw_smoothed is not None
+            else 90.0
+        )
+        serial_angles_deg.append(float(np.clip(wrist_yaw_deg, 0.0, 180.0)))
+
+        # Index 6: Single claw open/closed target (0.0 = closed, 1.0 = open)
+        if gripper_openness_smoothed is not None:
+            effective_openness = (
+                1.0 - gripper_openness_smoothed
+                if CONFIG["GRIPPER_REVERSED"]
+                else gripper_openness_smoothed
+            )
+            claw_deg = float(np.interp(effective_openness, [0.0, 1.0], [0.0, 180.0]))
+        else:
+            claw_deg = 90.0
+        serial_angles_deg.append(claw_deg)
+
+        payload = ",".join([f"{a:.1f}" for a in serial_angles_deg]) + "\n"
+        arduino.write(payload.encode("utf-8"))
         # ---------------------------------------------
-        
         env.step(CONFIG["SWIFT_STEP_SECONDS"])
         env.step(CONFIG["SWIFT_STEP_SECONDS"])
         swift_time_ms = (time.perf_counter() - swift_start) * 1000.0
